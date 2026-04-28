@@ -22,6 +22,13 @@ namespace storage
         return x > 9 ? x + 55 : x + 48;
     }
 
+    static bool IsHex(unsigned char x)
+    {
+        return (x >= 'A' && x <= 'F') ||
+               (x >= 'a' && x <= 'f') ||
+               (x >= '0' && x <= '9');
+    }
+
     static unsigned char FromHex(unsigned char x)
     {
         unsigned char y;
@@ -32,12 +39,12 @@ namespace storage
         else if (x >= '0' && x <= '9')
             y = x - '0';
         else
-            assert(0);
+            y = 0;
         return y;
     }
-    static std::string UrlDecode(const std::string &str)
+    static bool UrlDecode(const std::string &str, std::string *out)
     {
-        std::string strTemp = "";
+        out->clear();
         size_t length = str.length();
         for (size_t i = 0; i < length; i++)
         {
@@ -45,15 +52,24 @@ namespace storage
             //     strTemp += ' ';
             if (str[i] == '%')
             {
-                assert(i + 2 < length);
+                if (i + 2 >= length || !IsHex((unsigned char)str[i + 1]) || !IsHex((unsigned char)str[i + 2]))
+                    return false;
                 unsigned char high = FromHex((unsigned char)str[++i]);
                 unsigned char low = FromHex((unsigned char)str[++i]);
-                strTemp += high * 16 + low;
+                *out += high * 16 + low;
             }
             else
-                strTemp += str[i];
+                *out += str[i];
         }
-        return strTemp;
+        return true;
+    }
+
+    static std::string UrlDecode(const std::string &str)
+    {
+        std::string decoded;
+        if (!UrlDecode(str, &decoded))
+            return "";
+        return decoded;
     }
 
     class FileUtil
@@ -271,7 +287,7 @@ namespace storage
                 mylog::GetLogger("asynclogger")->Info("parse error");
                 return false;
             }
-            return false;
+            return true;
         }
     };
 }

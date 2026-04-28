@@ -6,6 +6,8 @@
 #include <event2/http.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
+#include <unistd.h>
+#include <cstring>
 
 using std::cout;
 using std::endl;
@@ -138,7 +140,7 @@ namespace my_storage {
 						std::cout << a << " upload failed!\n";
 					}
 				}
-				Sleep(1);//avoid waste cpu 
+				sleep(1);//avoid waste cpu
 			}
 		}
 	};

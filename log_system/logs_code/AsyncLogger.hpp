@@ -139,7 +139,7 @@ namespace mylog
                     std::cout << __FILE__ << __LINE__ << "thread pool closed" << std::endl;
                 }
             }
-             //获取到string类型的日志信息后就可以输出到异步缓冲区了，异步工作器后续会对其进行刷盘
+            //获取到string类型的日志信息后就可以输出到异步缓冲区了，异步工作器后续会对其进行刷盘
             Flush(data.c_str(), data.size());
 
             // std::cout << "Debug:serialize Flush\n";

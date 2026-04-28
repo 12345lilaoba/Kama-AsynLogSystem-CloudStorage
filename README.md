@@ -1,3 +1,198 @@
+# Kama-AsynLogSystem-CloudStorage
+
+一个基于 C++17 和 libevent 的轻量云存储服务，同时集成自研异步日志系统。项目当前定位不是完整商业网盘，而是一个适合学习、展示和面试讲解的工程项目：覆盖文件上传、普通存储、深度压缩存储、文件列表、下载、断点续传、删除、元数据持久化和日志轮转清理。
+
+## 核心能力
+
+- 文件上传：Web 页面上传文件，支持普通存储和深度存储。
+- 深度存储：对适合压缩的文件使用 bundle 压缩存储，对 zip、图片、音视频、PDF 等已压缩格式避免二次压缩。
+- 文件下载：支持完整下载和 HTTP Range 断点续传。
+- 文件删除：支持 Web 页面删除文件，并同步删除元数据。
+- 元数据管理：使用 `DataManager` 管理文件元数据，持久化到本地 `storage.data`。
+- 安全校验：校验文件名、URL 编码、上传大小，避免路径穿越和基础 XSS 风险。
+- 可靠写入：上传文件和元数据都采用临时文件加原子 `rename` 的方式写入。
+- 异步日志：业务线程写日志后由后台线程异步刷盘，降低日志 IO 对业务流程的影响。
+- 日志轮转：支持按大小、日期滚动日志，并按数量/时间清理旧日志。
+
+## 技术栈
+
+- C++17
+- libevent
+- jsoncpp
+- pthread
+- bundle 压缩库
+- 自研异步日志系统
+- HTML/CSS/JavaScript Web 页面
+
+## 项目结构
+
+```text
+Kama-AsynLogSystem-CloudStorage/
+├── log_system/                 # 自研异步日志系统
+│   ├── logs_code/
+│   │   ├── AsyncLogger.hpp
+│   │   ├── AsyncWorker.hpp
+│   │   ├── AsyncBuffer.hpp
+│   │   ├── LogFlush.hpp
+│   │   ├── Manager.hpp
+│   │   ├── Message.hpp
+│   │   ├── MyLog.hpp
+│   │   ├── ThreadPoll.hpp
+│   │   ├── Util.hpp
+│   │   └── config.conf
+│   └── examples/
+├── src/
+│   ├── server/                 # 云存储服务端
+│   │   ├── Test.cpp            # 服务端入口
+│   │   ├── Service.hpp         # HTTP 路由、上传、下载、删除、列表
+│   │   ├── DataManager.hpp     # 文件元数据管理和持久化
+│   │   ├── Config.hpp          # 服务端配置
+│   │   ├── Util.hpp            # 文件、JSON、URL 工具
+│   │   ├── Storage.conf        # 服务端配置文件
+│   │   ├── index.html          # Web 页面模板
+│   │   └── Makefile
+│   └── client/                 # 早期客户端上传工具，当前仅保留作参考
+├── PROJECT_STATUS.md           # 当前进度和下一步计划
+└── README.md
+```
+
+## 核心流程
+
+```mermaid
+flowchart TD
+    A[浏览器上传文件] --> B[libevent HTTP 服务]
+    B --> C{StorageType}
+    C -->|low| D[普通存储目录]
+    C -->|deep| E{是否适合压缩}
+    E -->|是| F[bundle 压缩后落盘]
+    E -->|否| G[深度目录原样落盘]
+    D --> H[生成 StorageInfo]
+    F --> H
+    G --> H
+    H --> I[DataManager 写入 storage.data]
+    B --> J[异步日志系统]
+    J --> K[后台线程批量刷盘]
+```
+
+```mermaid
+flowchart TD
+    A[浏览器下载文件] --> B[解析 URL 和 Range]
+    B --> C[DataManager 查询元数据]
+    C --> D{是否 bundle 压缩}
+    D -->|是| E[临时解压后返回原始内容]
+    D -->|否| F[直接读取文件]
+    E --> G{是否 Range 请求}
+    F --> G
+    G -->|是| H[返回 206 和 Content-Range]
+    G -->|否| I[返回 200]
+```
+
+## 编译和运行
+
+进入服务端目录：
+
+```bash
+cd /home/alex/projects/clound_storage/Kama-AsynLogSystem-CloudStorage/src/server
+```
+
+编译：
+
+```bash
+make
+```
+
+启动：
+
+```bash
+./test
+```
+
+服务端启动后会进入监听状态，终端不返回是正常现象。默认监听 `8081`，配置来自 `src/server/Storage.conf`。如果需要指定配置文件：
+
+```bash
+./test Storage.conf ../../log_system/logs_code/config.conf
+```
+
+## 常用接口示例
+
+访问文件列表：
+
+```bash
+curl -i http://127.0.0.1:8081/
+```
+
+普通存储上传：
+
+```bash
+curl -i -X POST \
+  -H FileName:Y29kZXhfY2hlY2sudHh0 \
+  -H StorageType:low \
+  --data-binary codex-ok \
+  http://127.0.0.1:8081/upload
+```
+
+深度存储上传：
+
+```bash
+curl -i -X POST \
+  -H FileName:Y29kZXhfZGVlcC50eHQ= \
+  -H StorageType:deep \
+  --data-binary deep-ok \
+  http://127.0.0.1:8081/upload
+```
+
+下载：
+
+```bash
+curl -i http://127.0.0.1:8081/download/codex_check.txt
+```
+
+断点续传：
+
+```bash
+curl -i -H Range:bytes=0-3 http://127.0.0.1:8081/download/codex_range.txt
+```
+
+删除：
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8081/delete/codex_check.txt
+```
+
+## 当前项目进度
+
+当前已经完成：
+
+- 上传、列表、下载、删除。
+- 普通存储和深度压缩存储。
+- 常见已压缩格式避免二次压缩。
+- 元数据持久化和服务重启恢复。
+- 文件名、URL、上传大小等基础安全校验。
+- Range 断点续传。
+- Web 页面搜索、排序、上传进度和删除反馈。
+- 异步日志后台刷盘。
+- 日志按大小/日期轮转和按数量/时间清理。
+
+详细进度和下一步计划见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
+
+## 面试讲解主线
+
+可以按这条线介绍项目：
+
+> 我实现了一个基于 C++17 和 libevent 的轻量云存储服务，支持文件上传、普通存储、深度压缩存储、下载、断点续传和删除。文件元数据由 `DataManager` 管理，并持久化到本地 JSON 文件中。为了保证可靠性，文件和元数据写入都采用临时文件加原子 `rename` 的方式。项目还集成了自研异步日志系统，通过异步缓冲和后台刷盘降低业务线程的日志开销，并支持日志轮转和清理。
+
+重点可展开：
+
+- HTTP 请求如何分发到上传、下载、删除、列表。
+- 普通存储和深度存储的区别。
+- 元数据如何组织、持久化和恢复。
+- 为什么写文件和元数据要用临时文件加 `rename`。
+- 如何防止路径穿越和基础 XSS。
+- 断点续传如何解析 `Range`。
+- 异步日志如何降低业务线程阻塞。
+- 后续如何扩展：文件 hash、分页、MySQL 元数据、多用户鉴权。
+
+## 原始学习资料
 
 # C++项目推荐：基于异步日志系统的云存储 | 代码随想录
 
@@ -106,6 +301,5 @@
 ## 获取本项目专栏
 
 **本文档仅为星球内部专享，大家可以加入[知识星球](https://programmercarl.com/other/kstar.html)里获取，在星球置顶一**
-
 
 

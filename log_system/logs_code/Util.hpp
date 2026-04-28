@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 using std::cout;
 using std::endl;
 namespace mylog
@@ -33,6 +34,15 @@ namespace mylog
                 if (pos != std::string::npos)
                     return filename.substr(0, pos + 1);
                 return "";
+            }
+            static std::string Name(const std::string &filename)
+            {
+                if (filename.empty())
+                    return "";
+                int pos = filename.find_last_of("/\\");
+                if (pos != std::string::npos)
+                    return filename.substr(pos + 1);
+                return filename;
             }
             static void CreateDirectory(const std::string &pathname)
             {
@@ -141,24 +151,39 @@ namespace mylog
                     std::cout <<__FILE__<<__LINE__<<"parse error" << err<<std::endl;
                     return false;
                 }
-                return false;
+                return true;
             }
         };
         struct JsonData{
-            static JsonData* GetJsonData(){
-               static JsonData* json_data = new JsonData;
+            static JsonData*& Instance(){
+               static JsonData* json_data = nullptr;
                return json_data;
+            }
+            static std::string& ConfigFile(){
+               static std::string config_file = "../../log_system/logs_code/config.conf";
+               return config_file;
+            }
+            static bool SetConfigFile(const std::string& config_file){
+               if (Instance() != nullptr)
+                   return false;
+               ConfigFile() = config_file;
+               return true;
+            }
+            static JsonData* GetJsonData(){
+               if (Instance() == nullptr)
+                   Instance() = new JsonData;
+               return Instance();
             }
             private:
                 JsonData(){
                 std::string content;
                 mylog::Util::File file;
-                if (file.GetContent(&content, "../../log_system/logs_code/config.conf") == false){
+                if (file.GetContent(&content, ConfigFile()) == false){
                     std::cout << __FILE__ << __LINE__ << "open config.conf failed" << std::endl;
                     perror(NULL);
                 }
                 Json::Value root;
-                mylog::Util::JsonUtil::UnSerialize(content, &root); // 反序列化，把内容转成jaon value格式
+                mylog::Util::JsonUtil::UnSerialize(content, &root); // 反序列化，把内容转成json value格式
                 buffer_size = root["buffer_size"].asInt64();
                 threshold = root["threshold"].asInt64();
                 linear_growth = root["linear_growth"].asInt64();
@@ -166,6 +191,9 @@ namespace mylog
                 backup_addr = root["backup_addr"].asString();
                 backup_port = root["backup_port"].asInt();
                 thread_count = root["thread_count"].asInt();
+                roll_file_max_size = root.get("roll_file_max_size", 1024 * 1024).asUInt64();
+                roll_file_max_count = root.get("roll_file_max_count", 10).asUInt64();
+                roll_file_max_age_days = root.get("roll_file_max_age_days", 7).asUInt64();
             }
             public:
                 size_t buffer_size;//缓冲区基础容量
@@ -175,6 +203,9 @@ namespace mylog
                 std::string backup_addr;
                 uint16_t backup_port;
                 size_t thread_count;
+                size_t roll_file_max_size;//单个滚动日志文件最大大小
+                size_t roll_file_max_count;//最多保留多少个滚动日志文件，0 表示不按数量清理
+                size_t roll_file_max_age_days;//最多保留多少天，0 表示不按时间清理
         };
     } // namespace Util
 } // namespace mylog

@@ -1,7 +1,16 @@
 #include <cassert>
+#include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <dirent.h>
 #include <fstream>
+#include <iomanip>
 #include <memory>
+#include <sstream>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 #include "Util.hpp"
 
 extern mylog::Util::JsonData* g_conf_data;
@@ -37,6 +46,14 @@ namespace mylog{
                 perror(NULL);
             }
         }
+        ~FileFlush()
+        {
+            if (fs_ != NULL)
+            {
+                fclose(fs_);
+                fs_ = NULL;
+            }
+        }
         void Flush(const char *data, size_t len) override{
             fwrite(data,1,len,fs_);
             if(ferror(fs_)){
@@ -63,16 +80,29 @@ namespace mylog{
     {
     public:
         using ptr = std::shared_ptr<RollFileFlush>;
-        RollFileFlush(const std::string &filename, size_t max_size)
-            : max_size_(max_size), basename_(filename)
+        RollFileFlush(const std::string &filename, size_t max_size = 0,
+                      size_t max_count = 0, size_t max_age_days = 0)
+            : max_size_(max_size == 0 ? g_conf_data->roll_file_max_size : max_size),
+              max_count_(max_count == 0 ? g_conf_data->roll_file_max_count : max_count),
+              max_age_days_(max_age_days == 0 ? g_conf_data->roll_file_max_age_days : max_age_days),
+              basename_(filename),
+              log_dir_(Util::File::Path(filename)),
+              file_prefix_(Util::File::Name(filename))
         {
             Util::File::CreateDirectory(Util::File::Path(filename));
+        }
+        ~RollFileFlush()
+        {
+            if (fs_ != NULL)
+            {
+                fclose(fs_);
+                fs_ = NULL;
+            }
         }
 
         void Flush(const char *data, size_t len) override
         {
-            // 确认文件大小不满足滚动需求
-            InitLogFile();
+            InitLogFile(len);
             // 向文件写入内容
             fwrite(data, 1, len, fs_);
             if(ferror(fs_)){
@@ -92,9 +122,10 @@ namespace mylog{
         }
 
     private:
-        void InitLogFile()
+        void InitLogFile(size_t len)
         {
-            if (fs_==NULL || cur_size_ >= max_size_)
+            std::string today = CurrentDay();
+            if (fs_ == NULL || cur_size_ + len > max_size_ || today != cur_day_)
             {
                 if(fs_!=NULL){
                     fclose(fs_);
@@ -105,9 +136,25 @@ namespace mylog{
                 if(fs_==NULL){
                     std::cout <<__FILE__<<__LINE__<<"open file failed"<< std::endl;
                     perror(NULL);
+                    return;
                 }
                 cur_size_ = 0;
+                cur_day_ = today;
+                CleanOldLogFiles();
             }
+        }
+
+        std::string CurrentDay()
+        {
+            time_t now = Util::Date::Now();
+            struct tm t;
+            localtime_r(&now, &t);
+            std::ostringstream oss;
+            oss << std::setfill('0')
+                << std::setw(4) << t.tm_year + 1900
+                << std::setw(2) << t.tm_mon + 1
+                << std::setw(2) << t.tm_mday;
+            return oss.str();
         }
 
         // 构建落地的滚动日志文件名称
@@ -116,22 +163,101 @@ namespace mylog{
             time_t time_ = Util::Date::Now();
             struct tm t;
             localtime_r(&time_, &t);
-            std::string filename = basename_;
-            filename += std::to_string(t.tm_year + 1900);
-            filename += std::to_string(t.tm_mon + 1);
-            filename += std::to_string(t.tm_mday);
-            filename += std::to_string(t.tm_hour + 1);
-            filename += std::to_string(t.tm_min + 1);
-            filename += std::to_string(t.tm_sec + 1) + '-' +
-                        std::to_string(cnt_++) + ".log";
-            return filename;
+            std::ostringstream oss;
+            oss << basename_ << std::setfill('0')
+                << std::setw(4) << t.tm_year + 1900
+                << std::setw(2) << t.tm_mon + 1
+                << std::setw(2) << t.tm_mday << '-'
+                << std::setw(2) << t.tm_hour
+                << std::setw(2) << t.tm_min
+                << std::setw(2) << t.tm_sec << '-'
+                << cnt_++ << ".log";
+            return oss.str();
+        }
+
+        struct LogFileInfo
+        {
+            std::string path_;
+            time_t mtime_;
+        };
+
+        bool IsRollLogFile(const std::string &filename)
+        {
+            if (filename.find(file_prefix_) != 0)
+                return false;
+            const std::string suffix = ".log";
+            if (filename.size() < suffix.size())
+                return false;
+            return filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+        }
+
+        void CleanOldLogFiles()
+        {
+            if (max_count_ == 0 && max_age_days_ == 0)
+                return;
+
+            std::string dir = log_dir_.empty() ? "." : log_dir_;
+            DIR *dp = opendir(dir.c_str());
+            if (dp == NULL)
+            {
+                std::cout << __FILE__ << __LINE__ << "open log dir failed:" << dir << std::endl;
+                perror(NULL);
+                return;
+            }
+
+            std::vector<LogFileInfo> files;
+            struct dirent *entry = NULL;
+            while ((entry = readdir(dp)) != NULL)
+            {
+                std::string name = entry->d_name;
+                if (!IsRollLogFile(name))
+                    continue;
+
+                std::string path = dir;
+                if (!path.empty() && path.back() != '/')
+                    path += "/";
+                path += name;
+
+                struct stat st;
+                if (stat(path.c_str(), &st) != 0)
+                    continue;
+                files.push_back({path, st.st_mtime});
+            }
+            closedir(dp);
+
+            time_t now = Util::Date::Now();
+            if (max_age_days_ > 0)
+            {
+                time_t max_age_seconds = static_cast<time_t>(max_age_days_ * 24 * 60 * 60);
+                for (const auto &file : files)
+                {
+                    if (now - file.mtime_ > max_age_seconds)
+                        std::remove(file.path_.c_str());
+                }
+            }
+
+            if (max_count_ == 0 || files.size() <= max_count_)
+                return;
+
+            std::sort(files.begin(), files.end(), [](const LogFileInfo &left, const LogFileInfo &right) {
+                return left.mtime_ < right.mtime_;
+            });
+
+            size_t remove_count = files.size() - max_count_;
+            for (size_t i = 0; i < remove_count; ++i)
+                std::remove(files[i].path_.c_str());
         }
 
     private:
         size_t cnt_ = 1;
         size_t cur_size_ = 0;
         size_t max_size_;
+        size_t max_count_;
+        size_t max_age_days_;
         std::string basename_;
+        std::string log_dir_;
+        std::string file_prefix_;
+        std::string cur_day_;
         // std::ofstream ofs_;
         FILE* fs_ = NULL;
     };

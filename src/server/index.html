@@ -7,9 +7,13 @@
     <title>卡码异步日志存储系统</title>
     <style>
         :root {
-            --primary-color: #2c3e50;
-            --secondary-color: #3498db;
-            --background: #f5f6fa;
+            --primary-color: #243447;
+            --secondary-color: #2477b3;
+            --danger-color: #d64545;
+            --success-color: #218a5a;
+            --muted-color: #667085;
+            --border-color: #d9e2ec;
+            --background: #f4f7fb;
             --card-bg: #ffffff;
         }
 
@@ -23,6 +27,7 @@
         body {
             background-color: var(--background);
             padding: 2rem;
+            color: var(--primary-color);
         }
 
         .container {
@@ -31,18 +36,17 @@
         }
 
         h1 {
-            text-align: center;
+            text-align: left;
             color: var(--primary-color);
-            margin-bottom: 2rem;
-            font-size: 2.5rem;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+            margin-bottom: 1.5rem;
+            font-size: 2rem;
         }
 
         .upload-section {
             background: var(--card-bg);
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 2rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-color);
             margin-bottom: 2rem;
         }
 
@@ -58,11 +62,12 @@
         }
 
         input[type="file"] {
-            border: 2px dashed #ddd;
+            border: 2px dashed var(--border-color);
             padding: 1rem;
             width: 100%;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
+            background: #fbfdff;
         }
 
         .storage-type {
@@ -72,11 +77,12 @@
         }
 
         .storage-type label {
-            background: #f0f0f0;
+            background: #eef3f8;
             padding: 0.8rem 1.5rem;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
             transition: all 0.3s ease;
+            border: 1px solid transparent;
         }
 
         .storage-type input:checked+label {
@@ -89,24 +95,102 @@
             color: white;
             border: none;
             padding: 0.8rem 1.5rem;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
             transition: all 0.3s ease;
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            min-height: 42px;
         }
 
         button:hover {
             opacity: 0.9;
-            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .upload-footer {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .progress-track {
+            flex: 1;
+            min-width: 220px;
+            height: 10px;
+            background: #e7edf4;
+            border-radius: 999px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar {
+            width: 0;
+            height: 100%;
+            background: var(--success-color);
+            transition: width 0.2s ease;
+        }
+
+        .status-message {
+            margin-top: 1rem;
+            min-height: 24px;
+            color: var(--muted-color);
+            font-size: 0.95rem;
+        }
+
+        .status-message.error {
+            color: var(--danger-color);
+        }
+
+        .status-message.success {
+            color: var(--success-color);
         }
 
         .file-list {
             background: var(--card-bg);
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 2rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-color);
+        }
+
+        .file-list-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            align-items: center;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .file-list h2 {
+            font-size: 1.25rem;
+        }
+
+        .file-tools {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .file-tools input,
+        .file-tools select {
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 0.7rem 0.8rem;
+            min-height: 40px;
+            background: white;
+        }
+
+        .file-count {
+            color: var(--muted-color);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
         }
 
         .file-item {
@@ -114,20 +198,72 @@
             align-items: center;
             justify-content: space-between;
             padding: 1rem;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid #edf1f5;
+            gap: 1rem;
         }
 
         .file-info {
             display: flex;
             gap: 1rem;
             align-items: center;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-weight: 600;
+            word-break: break-all;
         }
 
         .file-type {
-            background: #eee;
+            background: #eef3f8;
             padding: 0.3rem 0.8rem;
-            border-radius: 5px;
+            border-radius: 999px;
             font-size: 0.9rem;
+        }
+
+        .file-size,
+        .file-time {
+            color: var(--muted-color);
+            font-size: 0.92rem;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .delete-button {
+            background: var(--danger-color);
+        }
+
+        .empty-state {
+            display: none;
+            color: var(--muted-color);
+            padding: 1rem;
+            text-align: center;
+        }
+
+        @media (max-width: 720px) {
+            body {
+                padding: 1rem;
+            }
+
+            .upload-section,
+            .file-list {
+                padding: 1rem;
+            }
+
+            .file-item,
+            .file-list-header {
+                align-items: flex-start;
+            }
+
+            .file-item {
+                flex-direction: column;
+            }
         }
     </style>
 </head>
@@ -156,9 +292,13 @@
                 </div>
             </div>
 
-            <button onclick="uploadFile()">
-                ⬆️ 开始上传
-            </button>
+            <div class="upload-footer">
+                <button id="uploadButton" onclick="uploadFile()">⬆️ 开始上传</button>
+                <div id="uploadProgress" class="progress-track">
+                    <div id="uploadProgressBar" class="progress-bar"></div>
+                </div>
+            </div>
+            <div id="uploadStatus" class="status-message"></div>
         </div>
 
         <!-- 文件列表动态插入点 -->
@@ -171,44 +311,148 @@
             backendUrl: '{{BACKEND_URL}}'
         };
 
+        function setStatus(message, type = '') {
+            const status = document.getElementById('uploadStatus');
+            status.className = `status-message ${type}`;
+            status.textContent = message;
+        }
+
+        function setProgress(percent) {
+            const track = document.getElementById('uploadProgress');
+            const bar = document.getElementById('uploadProgressBar');
+            track.style.display = 'block';
+            bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+        }
+
+        function request(method, url, options = {}) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open(method, url);
+
+                Object.entries(options.headers || {}).forEach(([key, value]) => {
+                    xhr.setRequestHeader(key, value);
+                });
+
+                if (options.onProgress) {
+                    xhr.upload.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            options.onProgress(Math.round((event.loaded / event.total) * 100));
+                        }
+                    };
+                }
+
+                xhr.onload = () => resolve(xhr);
+                xhr.onerror = () => reject(new Error('网络连接失败'));
+                xhr.send(options.body || null);
+            });
+        }
+
         async function uploadFile() {
             const fileInput = document.getElementById('fileInput');
             const storageType = document.querySelector('input[name="storageType"]:checked').value;
             const file = fileInput.files[0];
+            const uploadButton = document.getElementById('uploadButton');
 
             if (!file) {
-                alert('请先选择文件');
+                setStatus('请先选择文件', 'error');
                 return;
             }
 
-            // // Base64 编码
             const encodedFilename = btoa(unescape(encodeURIComponent(file.name)));
-            console.log("Base64 编码结果:", encodedFilename);
+            uploadButton.disabled = true;
+            setStatus(`正在上传 ${file.name}`);
+            setProgress(0);
 
             try {
-                const response = await fetch(`${config.backendUrl}/upload`, {
-                    method: 'POST',
+                const response = await request('POST', `${config.backendUrl}/upload`, {
                     headers: {
                         'StorageType': storageType,
-                        'FileName': encodedFilename // 使用 Base64 编码
+                        'FileName': encodedFilename
                     },
-                    body: file
+                    body: file,
+                    onProgress: setProgress
                 });
 
-                if (response.ok) {
-                    location.reload();
+                if (response.status >= 200 && response.status < 300) {
+                    setProgress(100);
+                    setStatus('上传成功，正在刷新列表', 'success');
+                    setTimeout(() => location.reload(), 300);
                 } else {
-                    alert(`上传失败: ${response.status}`);
+                    const reason = response.statusText || response.responseText || 'server error';
+                    setStatus(`上传失败：${response.status} ${reason}`, 'error');
                 }
             } catch (error) {
                 console.error('上传错误:', error);
-                alert('网络连接失败');
+                setStatus(error.message || '网络连接失败', 'error');
+            } finally {
+                uploadButton.disabled = false;
             }
         }
 
-        function downloadFile(fileId) {
-            window.location = `${config.backendUrl}/download?id=${fileId}`;
+        async function deleteFile(url) {
+            if (!confirm('确认删除这个文件吗？')) {
+                return;
+            }
+
+            try {
+                setStatus('正在删除文件');
+                const response = await request('DELETE', `${config.backendUrl}${url}`);
+
+                if (response.status >= 200 && response.status < 300) {
+                    setStatus('删除成功，正在刷新列表', 'success');
+                    setTimeout(() => location.reload(), 300);
+                } else {
+                    const reason = response.statusText || response.responseText || 'server error';
+                    setStatus(`删除失败：${response.status} ${reason}`, 'error');
+                }
+            } catch (error) {
+                console.error('删除错误:', error);
+                setStatus(error.message || '网络连接失败', 'error');
+            }
         }
+
+        function fileItems() {
+            return Array.from(document.querySelectorAll('.file-item'));
+        }
+
+        function updateFileCount() {
+            const visible = fileItems().filter(item => item.style.display !== 'none').length;
+            const total = fileItems().length;
+            const count = document.getElementById('fileCount');
+            const empty = document.getElementById('emptyState');
+            if (count) count.textContent = `显示 ${visible} / ${total} 个文件`;
+            if (empty) empty.style.display = visible === 0 ? 'block' : 'none';
+        }
+
+        function filterFiles() {
+            const keyword = document.getElementById('fileSearch').value.trim().toLowerCase();
+            fileItems().forEach(item => {
+                const name = item.dataset.name.toLowerCase();
+                item.style.display = name.includes(keyword) ? '' : 'none';
+            });
+            updateFileCount();
+        }
+
+        function sortFiles() {
+            const sortType = document.getElementById('fileSort').value;
+            const container = document.getElementById('fileItems');
+            const items = fileItems();
+
+            items.sort((left, right) => {
+                if (sortType === 'name-asc') {
+                    return left.dataset.name.localeCompare(right.dataset.name, 'zh-CN');
+                }
+                if (sortType === 'size-desc') {
+                    return Number(right.dataset.size) - Number(left.dataset.size);
+                }
+                return Number(right.dataset.uploadTime) - Number(left.dataset.uploadTime);
+            });
+
+            items.forEach(item => container.appendChild(item));
+            filterFiles();
+        }
+
+        sortFiles();
     </script>
 </body>
 

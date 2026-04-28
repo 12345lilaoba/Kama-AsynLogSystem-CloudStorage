@@ -6,7 +6,6 @@
 namespace storage
 {
     // 懒汉模式
-    const char *Config_File = "Storage.conf";
     class Config
     {
     private:
@@ -17,9 +16,11 @@ namespace storage
         std::string low_storage_dir_;     // 浅度存储文件的存储路径
         std::string storage_info_;     // 已存储文件的信息
         int bundle_format_;//深度存储的文件后缀，由选择的压缩格式确定
+        size_t max_upload_size_; // 单次上传允许的最大文件大小
     private:
         static std::mutex _mutex;
         static Config *_instance;
+        static std::string config_file_;
         Config()
         {
             if (ReadConfig() == false)
@@ -36,7 +37,7 @@ namespace storage
         {
             mylog::GetLogger("asynclogger")->Info("ReadConfig start");
 
-            storage::FileUtil fu(Config_File);
+            storage::FileUtil fu(config_file_);
             std::string content;
             if (!fu.GetContent(&content))
             {
@@ -44,7 +45,7 @@ namespace storage
             }
 
             Json::Value root;
-            storage::JsonUtil::UnSerialize(content, &root); // 反序列化，把内容转成jaon value格式
+            storage::JsonUtil::UnSerialize(content, &root); // 反序列化，把内容转成json value格式
 
             // 要记得转换的时候用上asint，asstring这种函数，json的数据类型是Value。
             server_port_ = root["server_port"].asInt();
@@ -54,6 +55,7 @@ namespace storage
             deep_storage_dir_ = root["deep_storage_dir"].asString();
             low_storage_dir_ = root["low_storage_dir"].asString();
             bundle_format_ = root["bundle_format"].asInt();
+            max_upload_size_ = root.get("max_upload_size", 100 * 1024 * 1024).asUInt64();
             
             return true;
         }
@@ -85,8 +87,21 @@ namespace storage
         {
             return storage_info_;
         }
+        size_t GetMaxUploadSize()
+        {
+            return max_upload_size_;
+        }
 
     public:
+        static bool SetConfigFile(const std::string &config_file)
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (_instance != nullptr)
+                return false;
+            config_file_ = config_file;
+            return true;
+        }
+
         // 获取单例类对象
         static Config *GetInstance()
         {
@@ -105,4 +120,5 @@ namespace storage
     // 静态成员初始化，先写类型再写类域
     std::mutex Config::_mutex;
     Config *Config::_instance = nullptr;
+    std::string Config::config_file_ = "Storage.conf";
 }

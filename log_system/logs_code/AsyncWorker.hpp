@@ -38,20 +38,29 @@ namespace mylog
         }
         void Stop()
         {
-            stop_ = true;
+            {
+                std::unique_lock<std::mutex> lock(mtx_);
+                if (stop_)
+                    return;
+                stop_ = true;
+            }
             cond_consumer_.notify_all(); // 所有线程把缓冲区内数据处理完就结束了
-            thread_.join();
+            cond_productor_.notify_all();
+            if (thread_.joinable())
+                thread_.join();
         }
 
     private:
         void ThreadEntry()
         {
-            while (!stop_)
+            while (true)
             {
                 { // 缓冲区交换完就解锁，让productor继续写入数据
                     std::unique_lock<std::mutex> lock(mtx_);
                     cond_consumer_.wait(lock, [&]()
                                         { return stop_ || !buffer_productor_.IsEmpty(); });
+                    if (stop_ && buffer_productor_.IsEmpty())
+                        return;
                     buffer_productor_.Swap(buffer_consumer_);
                     // 固定容量的缓冲区才需要唤醒
                     if (async_type_ == AsyncType::ASYNC_SAFE)
@@ -59,8 +68,6 @@ namespace mylog
                 }
                 callback_(buffer_consumer_); // 调用回调函数对缓冲区中数据进行处理
                 buffer_consumer_.Reset();
-                if (stop_ && buffer_productor_.IsEmpty())
-                    return;
             }
         }
 

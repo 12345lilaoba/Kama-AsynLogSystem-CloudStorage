@@ -1,0 +1,20 @@
+# Build outputs
+src/server/test
+src/server/gdb_test
+log_system/logs_code/backlog/backup_server
+
+# Runtime data
+src/server/storage.data
+src/server/storage.data.tmp
+src/server/logfile/
+src/server/low_storage/
+src/server/deep_storage/
+src/server/testfile/
+
+# Temporary upload files
+*.uploading
+
+# Local editor/system files
+.DS_Store
+*.swp
+*.swo
