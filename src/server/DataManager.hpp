@@ -18,12 +18,16 @@ namespace storage
         std::string storage_type_; // low / deep
         bool compressed_;          // 是否经过 bundle 压缩
         std::string content_type_; // 上传时的 Content-Type
+        std::string content_hash_; // 上传内容的 hash 指纹
+        std::string hash_algo_;    // hash 算法名称
 
         bool NewStorageInfo(const std::string &storage_path,
                             const std::string &storage_type = "low",
                             bool compressed = false,
                             size_t original_size = 0,
-                            const std::string &content_type = "application/octet-stream")
+                            const std::string &content_type = "application/octet-stream",
+                            const std::string &content_hash = "",
+                            const std::string &hash_algo = "fnv1a64")
         {
             // 初始化备份文件的信息
             mylog::GetLogger("asynclogger")->Info("NewStorageInfo start");
@@ -43,6 +47,8 @@ namespace storage
             storage_type_ = storage_type;
             compressed_ = compressed;
             content_type_ = content_type.empty() ? "application/octet-stream" : content_type;
+            content_hash_ = content_hash;
+            hash_algo_ = hash_algo.empty() ? "fnv1a64" : hash_algo;
             // URL实际就是用户下载文件请求的路径
             // 下载路径前缀+文件名
             storage::Config *config = storage::Config::GetInstance();
@@ -57,6 +63,42 @@ namespace storage
     class DataManager
     {
     private:
+        class ReadLockGuard
+        {
+        private:
+            pthread_rwlock_t *lock_;
+
+        public:
+            explicit ReadLockGuard(pthread_rwlock_t *lock) : lock_(lock)
+            {
+                pthread_rwlock_rdlock(lock_);
+            }
+            ~ReadLockGuard()
+            {
+                pthread_rwlock_unlock(lock_);
+            }
+            ReadLockGuard(const ReadLockGuard &) = delete;
+            ReadLockGuard &operator=(const ReadLockGuard &) = delete;
+        };
+
+        class WriteLockGuard
+        {
+        private:
+            pthread_rwlock_t *lock_;
+
+        public:
+            explicit WriteLockGuard(pthread_rwlock_t *lock) : lock_(lock)
+            {
+                pthread_rwlock_wrlock(lock_);
+            }
+            ~WriteLockGuard()
+            {
+                pthread_rwlock_unlock(lock_);
+            }
+            WriteLockGuard(const WriteLockGuard &) = delete;
+            WriteLockGuard &operator=(const WriteLockGuard &) = delete;
+        };
+
         std::string storage_file_;
         pthread_rwlock_t rwlock_;
         std::unordered_map<std::string, StorageInfo> table_;
@@ -77,6 +119,8 @@ namespace storage
         {
             pthread_rwlock_destroy(&rwlock_);
         }
+        DataManager(const DataManager &) = delete;
+        DataManager &operator=(const DataManager &) = delete;
 
         bool InitLoad() // 初始化程序运行时从文件读取数据
         {
@@ -130,6 +174,14 @@ namespace storage
                     info.content_type_ = root[i]["content_type_"].asString();
                 else
                     info.content_type_ = "application/octet-stream";
+                if (root[i].isMember("content_hash_"))
+                    info.content_hash_ = root[i]["content_hash_"].asString();
+                else
+                    info.content_hash_.clear();
+                if (root[i].isMember("hash_algo_"))
+                    info.hash_algo_ = root[i]["hash_algo_"].asString();
+                else
+                    info.hash_algo_ = info.content_hash_.empty() ? "" : "fnv1a64";
                 Insert(info);
             }
             return true;
@@ -162,6 +214,8 @@ namespace storage
                 item["storage_type_"] = e.storage_type_.c_str();
                 item["compressed_"] = e.compressed_;
                 item["content_type_"] = e.content_type_.c_str();
+                item["content_hash_"] = e.content_hash_.c_str();
+                item["hash_algo_"] = e.hash_algo_.c_str();
                 root.append(item); // 作为数组
             }
 
@@ -192,9 +246,10 @@ namespace storage
         bool Insert(const StorageInfo &info)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Insert start");
-            pthread_rwlock_wrlock(&rwlock_); // 加写锁
-            table_[info.url_] = info;
-            pthread_rwlock_unlock(&rwlock_);
+            {
+                WriteLockGuard lock(&rwlock_);
+                table_[info.url_] = info;
+            }
             if (need_persist_ == true && Storage() == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Insert:Storage Error");
@@ -207,9 +262,10 @@ namespace storage
         bool Update(const StorageInfo &info)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Update start");
-            pthread_rwlock_wrlock(&rwlock_);
-            table_[info.url_] = info;
-            pthread_rwlock_unlock(&rwlock_);
+            {
+                WriteLockGuard lock(&rwlock_);
+                table_[info.url_] = info;
+            }
             if (Storage() == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Update:Storage Error");
@@ -221,16 +277,16 @@ namespace storage
         bool Delete(const std::string &key)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Delete start");
-            pthread_rwlock_wrlock(&rwlock_);
-            auto it = table_.find(key);
-            if (it == table_.end())
             {
-                pthread_rwlock_unlock(&rwlock_);
-                mylog::GetLogger("asynclogger")->Info("data_message Delete:not found");
-                return false;
+                WriteLockGuard lock(&rwlock_);
+                auto it = table_.find(key);
+                if (it == table_.end())
+                {
+                    mylog::GetLogger("asynclogger")->Info("data_message Delete:not found");
+                    return false;
+                }
+                table_.erase(it);
             }
-            table_.erase(it);
-            pthread_rwlock_unlock(&rwlock_);
             if (Storage() == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Delete:Storage Error");
@@ -241,39 +297,35 @@ namespace storage
         }
         bool GetOneByURL(const std::string &key, StorageInfo *info)
         {
-            pthread_rwlock_rdlock(&rwlock_);
+            ReadLockGuard lock(&rwlock_);
             // URL是key，所以直接find()找
-            if (table_.find(key) == table_.end())
+            auto it = table_.find(key);
+            if (it == table_.end())
             {
-                pthread_rwlock_unlock(&rwlock_);
                 return false;
             }
-            *info = table_[key]; // 获取url对应的文件存储信息
-            pthread_rwlock_unlock(&rwlock_);
+            *info = it->second; // 获取url对应的文件存储信息
             return true;
         }
         bool GetOneByStoragePath(const std::string &storage_path, StorageInfo *info)
         {
-            pthread_rwlock_rdlock(&rwlock_);
+            ReadLockGuard lock(&rwlock_);
             // 遍历 通过realpath字段找到对应存储信息
-            for (auto e : table_)
+            for (const auto &e : table_)
             {
                 if (e.second.storage_path_ == storage_path)
                 {
                     *info = e.second;
-                    pthread_rwlock_unlock(&rwlock_);
                     return true;
                 }
             }
-            pthread_rwlock_unlock(&rwlock_);
             return false;
         }
         bool GetAll(std::vector<StorageInfo> *arry)
         {
-            pthread_rwlock_rdlock(&rwlock_);
-            for (auto e : table_)
+            ReadLockGuard lock(&rwlock_);
+            for (const auto &e : table_)
                 arry->emplace_back(e.second);
-            pthread_rwlock_unlock(&rwlock_);
             return true;
         }
     }; // namespace DataManager

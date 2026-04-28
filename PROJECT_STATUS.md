@@ -39,6 +39,8 @@ Kama-AsynLogSystem-CloudStorage/
 │   ├── server/                 # 云存储服务端
 │   │   ├── Test.cpp            # 服务端启动入口
 │   │   ├── Service.hpp         # HTTP 服务、上传/下载/删除/列表逻辑
+│   │   ├── HttpUtil.hpp        # HTTP 相关工具函数、安全校验、Range 解析、hash 计算
+│   │   ├── PageRender.hpp      # 文件列表页面渲染
 │   │   ├── DataManager.hpp     # 文件元数据管理和持久化
 │   │   ├── Config.hpp          # 服务端配置单例
 │   │   ├── Util.hpp            # 文件、JSON、URL 工具
@@ -83,7 +85,8 @@ Kama-AsynLogSystem-CloudStorage/
 9. 写入 `.uploading` 临时文件。
 10. 写入成功后 `rename` 到正式文件路径。
 11. 构造 `StorageInfo`，记录存储类型、是否压缩、文件大小和上传时间，写入 `DataManager`。
-12. `DataManager` 将元数据持久化到 `storage.data`。
+12. 上传时计算文件内容 hash，作为后续内容校验和去重的基础元数据。
+13. `DataManager` 将元数据持久化到 `storage.data`。
 
 ### 3.3 文件列表流程
 
@@ -174,11 +177,15 @@ Kama-AsynLogSystem-CloudStorage/
   - `original_size_`：记录上传时的原始文件大小。
   - `stored_size_`：记录实际落盘后的存储大小。
   - `content_type_`：记录上传请求中的文件 MIME 类型。
+  - `content_hash_`：记录上传内容的 hash 指纹。
+  - `hash_algo_`：记录 hash 算法，目前为 `fnv1a64`。
 - 兼容旧 `storage.data`：旧记录没有新字段时，根据路径推断 `storage_type_`，旧深度存储记录默认视为已压缩。
+- 兼容旧 hash 元数据：旧记录没有 `content_hash_` 和 `hash_algo_` 时保持为空，不影响列表、下载和删除。
 - 元数据持久化改为临时文件加原子替换。
 - `storage::JsonUtil::UnSerialize` 成功时返回 `true`。
 - 文件列表页面做了展示收敛：前端只展示文件大小和上传时间，原始大小、实际落盘大小、MIME 类型等字段保留在后端元数据中备用。
-- 下载响应新增 `X-Storage-Type`、`X-Storage-Compressed`、`X-Original-Size`、`X-Stored-Size` 元数据头。
+- 下载响应新增 `X-Storage-Type`、`X-Storage-Compressed`、`X-Original-Size`、`X-Stored-Size`、`X-Content-Hash`、`X-Hash-Algorithm` 元数据头。
+- 当前 hash 使用轻量 `FNV-1a 64-bit` 内容指纹，无额外依赖，适合作为项目当前阶段的内容标识和去重基础；如果后续需要更强完整性校验，可替换为 SHA-256。
 
 ### 4.3 配置
 
@@ -227,6 +234,40 @@ Kama-AsynLogSystem-CloudStorage/
   - 头文件变化会触发重新编译。
   - `test` 和 `gdb_test` 都依赖 `base64.cpp` 和相关 `.hpp`。
 
+### 4.6 代码结构收敛
+
+- 对 `src/server/Service.hpp` 做了低风险拆分，避免服务层继续膨胀：
+  - 新增 `src/server/HttpUtil.hpp`，承接文件名安全校验、HTML 转义、URL 编码、已压缩格式判断、Content-Type 归一化、FNV-1a hash 计算、原子写文件和 Range 解析。
+  - 新增 `src/server/PageRender.hpp`，承接文件大小格式化、上传时间格式化和文件列表 HTML 渲染。
+  - `Service.hpp` 保留 HTTP 请求分发以及上传、列表、删除、下载主流程。
+- 拆分后当前行数：
+  - `Service.hpp`：约 495 行。
+  - `HttpUtil.hpp`：约 221 行。
+  - `PageRender.hpp`：约 98 行。
+- 这次拆分不改变接口行为，只降低单文件复杂度，后续如果继续拆分，可以再考虑 `UploadHandler.hpp`、`DownloadHandler.hpp`、`DeleteHandler.hpp`。
+
+### 4.7 C++ 工程化增强
+
+当前阶段开始把优化重心转向 C++ 后端岗位更关注的工程能力：
+
+- `Service::RunModule` 使用 `std::unique_ptr` + 自定义 deleter 管理 `event_base` 和 `evhttp`：
+  - `event_base_free` 和 `evhttp_free` 不再依赖手动分支释放。
+  - 绑定端口失败、创建 HTTP 上下文失败等提前返回路径也能自动释放资源。
+  - `evhttp` 会先于 `event_base` 析构，释放顺序更清晰。
+- 新增 `HttpUtil::UniqueFd`：
+  - 下载流程打开文件后由 RAII 对象管理文件描述符。
+  - `evbuffer_add_file` 失败时自动关闭 fd。
+  - `evbuffer_add_file` 成功后通过 `Release()` 把 fd 所有权交给 libevent，避免重复关闭。
+- `DataManager` 增加读写锁 RAII Guard：
+  - `ReadLockGuard` 封装 `pthread_rwlock_rdlock / pthread_rwlock_unlock`。
+  - `WriteLockGuard` 封装 `pthread_rwlock_wrlock / pthread_rwlock_unlock`。
+  - `Insert`、`Update`、`Delete`、`GetOneByURL`、`GetOneByStoragePath`、`GetAll` 不再手动配对 unlock，减少异常路径或提前返回导致忘记解锁的风险。
+- `DataManager` 禁止拷贝：
+  - `DataManager(const DataManager&) = delete`
+  - `operator=(const DataManager&) = delete`
+  - 避免包含 `pthread_rwlock_t` 的管理类被误拷贝。
+- `GetOneByURL` 改为使用 `find` 迭代器读取，避免在读锁保护下使用 `operator[]`。
+
 ## 5. 已验证的功能
 
 在 `src/server` 下编译通过：
@@ -274,86 +315,100 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
   - 深度存储测试文件上传返回 `200`，下载返回解压后的原始内容。
   - `Range: bytes=0-4` 返回 `206` 和 `Content-Range`。
   - 测试文件已通过 `DELETE` 删除。
+- 2026-04-29 hash 元数据验证：
+  - 使用临时端口 `18081` 启动独立服务端实例，不影响当前 `8081` 服务。
+  - 上传测试文件后，临时 `storage.data` 已持久化 `content_hash_` 和 `hash_algo_`。
+  - 下载响应已返回 `X-Content-Hash` 和 `X-Hash-Algorithm`。
+  - 临时服务端、临时配置和临时存储目录已清理。
+- 2026-04-29 `Service.hpp` 拆分验证：
+  - 新增 `HttpUtil.hpp` 和 `PageRender.hpp` 后，`make` 编译通过。
+  - `Service.hpp` 中原有工具逻辑和页面渲染逻辑已迁出，业务主流程保持不变。
+- 2026-04-29 C++ 工程化验证：
+  - `event_base`、`evhttp`、下载文件 fd、元数据读写锁已做 RAII 化。
+  - `make` 编译通过。
 
 注意：当前 `8081` 上已有一个 `test` 服务端进程在监听，本轮验证复用了该进程，没有额外启动第二个服务端。
 
 ## 6. 当前工作区状态
 
-当前阶段的主线改动已经基本完成，重点集中在服务端云存储能力、元数据管理、Web 页面和日志系统稳定性上。
+当前阶段的主线改动已经基本完成，重点集中在服务端云存储能力、元数据管理、Web 页面、日志系统稳定性、代码结构收敛和 C++ 工程化上。
 
 当前仍有未提交源码改动：
 
-- 云存储服务端：`src/server/Service.hpp`、`src/server/DataManager.hpp`、`src/server/Util.hpp`、`src/server/Config.hpp`、`src/server/Test.cpp`、`src/server/Makefile`、`src/server/index.html`、`src/server/Storage.conf`
-- 日志系统：`log_system/logs_code/AsyncLogger.hpp`、`log_system/logs_code/AsyncWorker.hpp`、`log_system/logs_code/LogFlush.hpp`、`log_system/logs_code/Util.hpp`、`log_system/logs_code/config.conf`
-- 历史客户端：`src/client/Storage.hpp`，后续不再作为主要扩展方向
-- 示例代码：`log_system/examples/test.cpp`
-
-当前未跟踪文件：
-
-- `.gitignore`
 - `PROJECT_STATUS.md`
+- `src/server/DataManager.hpp`
+- `src/server/Service.hpp`
+- `src/server/HttpUtil.hpp`
+- `src/server/PageRender.hpp`
 
 当前阶段已经完成但还需要最终收口的点：
 
-- 服务端安全校验、删除接口、断点续传、深度存储压缩判断已经完成。
-- 元数据已经增强，后端记录上传时间、原始大小、实际落盘大小、存储类型、是否压缩和 MIME 类型。
-- Web 文件列表已经收敛为用户视角展示，只保留文件名、存储类型、文件大小、上传时间和操作按钮。
-- 日志系统已经支持按大小/日期轮转，并支持按数量/时间清理。
-- README 已更新为当前项目说明，包含架构、核心流程、运行方式、接口示例和面试讲解主线。
-- `make` 和核心业务流程已经完成一轮收口验证。
+- hash 元数据已实现并验证。
+- `Service.hpp` 已拆出 `HttpUtil.hpp` 和 `PageRender.hpp`，编译通过。
+- 阶段 1 的 C++ 工程化增强已完成第一轮：RAII 管理 libevent 资源、fd 和读写锁。
+- 下一步建议先提交当前 hash、拆分和 RAII 改动，再进入 MySQL 元数据阶段。
 
 ## 7. 下一步计划
 
-### 优先级 P0：收口当前阶段
+### 优先级 P0：提交当前小阶段
 
-1. 再跑一遍完整编译。
-2. 再跑一遍核心业务流程：
-   - 普通上传
-   - 深度上传
-   - 文件列表
-   - 普通下载
-   - Range 断点续传
-   - 删除文件
-3. 补一组深度存储专项验证：
-   - 深度 `.zip` 上传后 `compressed_ = false`，下载不解压。
-   - 深度 `.txt` 上传后 `compressed_ = true`，下载可解压。
-4. 再验证一次日志系统：
-   - 小阈值配置下可以滚动日志。
-   - 超过保留数量后可以清理旧日志。
-5. 整理一次 git diff，确认没有误改。
-6. 提交一个阶段性 commit。
+1. 再查看一次 `git diff --stat`，确认只包含 hash 元数据和 `Service.hpp` 拆分相关改动。
+2. 再跑一次 `git diff --check`。
+3. 提交当前小阶段，建议 commit message：
+   - `Add file hash metadata and improve C++ resource management`
 
-### 优先级 P1：工程收纳和仓库清理
+### 优先级 P1：MySQL 元数据接口抽象
 
-当前已经新增 `.gitignore`，下一步要确认它是否覆盖所有运行产物和测试产物：
+后续要更贴近 C++ 后端岗位，建议优先把当前 JSON 元数据存储抽象成接口，为 MySQL 做准备：
 
-- 建议忽略：
-  - `src/server/test`
-  - `src/server/storage.data`
-  - `src/server/logfile/`
-  - `src/server/low_storage/`
-  - `src/server/deep_storage/`
-  - `src/server/testfile/`
-  - `log_system/logs_code/backlog/backup_server`
-- 区分源码改动、配置改动、文档改动和运行产物。
-- 确认 `PROJECT_FLOW_OVERVIEW.svg` 是否作为项目说明图提交。
-- 把当前阶段提交成一个清晰 commit，建议主题：
-  - `cloud storage safety and metadata enhancement`
-  - `add resumable download and delete flow`
-  - `improve async log rotation cleanup`
+- 新增 `MetadataStore` 抽象接口：
+  - `Insert`
+  - `Delete`
+  - `GetOneByURL`
+  - `GetAll`
+- 将当前 `storage.data` JSON 持久化逻辑迁移为 `JsonMetadataStore`。
+- `DataManager` 负责内存缓存和并发保护，底层持久化通过 `MetadataStore` 完成。
+- 下一步再新增 `MysqlMetadataStore`：
+  - 封装 MySQL 连接。
+  - 使用预编译 SQL 或清晰的 SQL 封装。
+  - 为 `url`、`content_hash`、`upload_time` 建索引。
 
-### 优先级 P1：README 和展示材料
+### 优先级 P1：线程库能力增强
 
-当前能力已经比较适合做项目展示，下一步建议把 README 和讲解材料补齐：
+当前项目已有异步日志后台线程和读写锁。后续可以继续强化线程库相关能力：
 
-- README 更新项目架构、编译方式、运行方式和接口示例。
-- 补一张项目流程图，覆盖上传、元数据写入、下载、断点续传、删除和日志链路。
-- 整理一组面试讲解用例，突出可靠写入、元数据恢复、压缩存储、断点续传和异步日志。
-- 把“服务端启动后终端不返回是正常监听状态”写进运行说明，避免误以为程序卡住。
+- 梳理并优化已有 `ThreadPool`：
+  - 明确任务队列。
+  - 使用 `std::mutex` 和 `std::condition_variable`。
+  - 支持优雅停止。
+  - 避免重复 Stop、遗漏唤醒和线程 join 问题。
+- 增加后台维护任务：
+  - 定期扫描存储目录。
+  - 检查文件和元数据是否一致。
+  - 发现孤儿文件或缺失元数据时记录日志。
+- 当前不建议直接把 `evhttp_request` 跨线程处理，先把线程池用于后台维护任务更稳。
+
+### 优先级 P2：元数据损坏恢复
+
+增强 `storage.data` 损坏时的恢复能力：
+
+- JSON 解析失败时记录明确错误日志。
+- 将损坏的 `storage.data` 改名备份，例如 `storage.data.bad.<timestamp>`。
+- 使用空元数据继续启动服务，避免整个服务不可用。
+- 后续可以增加从磁盘目录扫描恢复元数据的能力。
+
+### 优先级 P2：文件列表分页
+
+当前文件列表一次性渲染全部文件。后续文件变多时，页面会变长，可以做前端分页：
+
+- 每页显示固定数量文件，例如 10 或 20。
+- 搜索、排序后重新分页。
+- 后续如果文件量更大，再扩展成后端分页接口。
 
 ### 优先级 P2：功能增强
 
-- 增加文件 hash，用于内容校验和后续去重。
+- 将当前 `fnv1a64` 内容指纹升级为 SHA-256，用于更强的完整性校验。
+- 基于文件 hash 做重复内容检测，为后续秒传/去重打基础。
 - 文件列表支持分页，避免文件很多时页面过长。
 - 元数据加载失败时给出更明确的错误日志。
 - 后续可把本地 `storage.data` 迁移到 MySQL。

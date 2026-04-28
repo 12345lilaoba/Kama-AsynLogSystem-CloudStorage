@@ -1,5 +1,7 @@
 #pragma once
 #include "DataManager.hpp"
+#include "HttpUtil.hpp"
+#include "PageRender.hpp"
 
 #include <sys/queue.h>
 #include <event.h>
@@ -11,12 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
-#include <limits>
+#include <memory>
 #include <regex>
-#include <unordered_set>
 
 #include "base64.h" // 来自 cpp-base64 库
 
@@ -41,8 +39,8 @@ namespace storage
         bool RunModule()
         {
             // 初始化环境
-            event_base *base = event_base_new();
-            if (base == NULL)
+            std::unique_ptr<event_base, decltype(&event_base_free)> base(event_base_new(), event_base_free);
+            if (base == nullptr)
             {
                 mylog::GetLogger("asynclogger")->Fatal("event_base_new err!");
                 return false;
@@ -53,31 +51,29 @@ namespace storage
             sin.sin_family = AF_INET;
             sin.sin_port = htons(server_port_);
             // http 服务器,创建evhttp上下文
-            evhttp *httpd = evhttp_new(base);
+            std::unique_ptr<evhttp, decltype(&evhttp_free)> httpd(evhttp_new(base.get()), evhttp_free);
+            if (httpd == nullptr)
+            {
+                mylog::GetLogger("asynclogger")->Fatal("evhttp_new err!");
+                return false;
+            }
             // 绑定端口和ip
-            if (evhttp_bind_socket(httpd, "0.0.0.0", server_port_) != 0)
+            if (evhttp_bind_socket(httpd.get(), "0.0.0.0", server_port_) != 0)
             {
                 mylog::GetLogger("asynclogger")->Fatal("evhttp_bind_socket failed!");
                 return false;
             }
             // 设定回调函数
             // 指定generic callback，也可以为特定的URI指定callback
-            evhttp_set_gencb(httpd, GenHandler, NULL);
+            evhttp_set_gencb(httpd.get(), GenHandler, NULL);
 
-            if (base)
-            {
 #ifdef DEBUG_LOG
-                mylog::GetLogger("asynclogger")->Debug("event_base_dispatch");
+            mylog::GetLogger("asynclogger")->Debug("event_base_dispatch");
 #endif
-                if (-1 == event_base_dispatch(base))
-                {
-                    mylog::GetLogger("asynclogger")->Debug("event_base_dispatch err");
-                }
+            if (-1 == event_base_dispatch(base.get()))
+            {
+                mylog::GetLogger("asynclogger")->Debug("event_base_dispatch err");
             }
-            if (base)
-                event_base_free(base);
-            if (httpd)
-                evhttp_free(httpd);
             return true;
         }
 
@@ -87,196 +83,6 @@ namespace storage
         std::string download_prefix_;
 
     private:
-        static bool IsSafeFileName(const std::string &filename)
-        {
-            if (filename.empty() || filename.size() > 255)
-                return false;
-            if (filename == "." || filename == "..")
-                return false;
-            if (filename.find('/') != std::string::npos ||
-                filename.find('\\') != std::string::npos ||
-                filename.find("..") != std::string::npos)
-                return false;
-
-            for (unsigned char ch : filename)
-            {
-                if (ch < 32 || ch == 127)
-                    return false;
-            }
-            return true;
-        }
-
-        static std::string HtmlEscape(const std::string &input)
-        {
-            std::string output;
-            for (char ch : input)
-            {
-                switch (ch)
-                {
-                case '&':
-                    output += "&amp;";
-                    break;
-                case '<':
-                    output += "&lt;";
-                    break;
-                case '>':
-                    output += "&gt;";
-                    break;
-                case '"':
-                    output += "&quot;";
-                    break;
-                case '\'':
-                    output += "&#39;";
-                    break;
-                default:
-                    output += ch;
-                    break;
-                }
-            }
-            return output;
-        }
-
-        static std::string UrlEncodePathSegment(const std::string &input)
-        {
-            static const char *hex = "0123456789ABCDEF";
-            std::string output;
-            for (unsigned char ch : input)
-            {
-                if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.')
-                {
-                    output += ch;
-                }
-                else
-                {
-                    output += '%';
-                    output += hex[ch >> 4];
-                    output += hex[ch & 0x0F];
-                }
-            }
-            return output;
-        }
-
-        static std::string Lowercase(std::string input)
-        {
-            for (char &ch : input)
-                ch = std::tolower(static_cast<unsigned char>(ch));
-            return input;
-        }
-
-        static bool IsAlreadyCompressedFile(const std::string &filename)
-        {
-            static const std::unordered_set<std::string> compressed_exts = {
-                ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz",
-                ".jpg", ".jpeg", ".png", ".gif", ".webp",
-                ".mp4", ".mkv", ".avi", ".mov", ".mp3", ".aac", ".flac",
-                ".pdf"};
-
-            std::string lower_filename = Lowercase(filename);
-            size_t dot_pos = lower_filename.find_last_of('.');
-            if (dot_pos == std::string::npos)
-                return false;
-            return compressed_exts.find(lower_filename.substr(dot_pos)) != compressed_exts.end();
-        }
-
-        static std::string NormalizeContentType(const char *content_type)
-        {
-            if (content_type == nullptr || content_type[0] == '\0')
-                return "application/octet-stream";
-
-            std::string normalized = content_type;
-            if (normalized.size() > 128)
-                normalized.resize(128);
-
-            for (char &ch : normalized)
-            {
-                unsigned char uch = static_cast<unsigned char>(ch);
-                if (uch < 32 || uch == 127)
-                    ch = ' ';
-            }
-            return normalized;
-        }
-
-        static bool WriteFileAtomically(const std::string &storage_path, const std::string &content, bool compress_content)
-        {
-            std::string tmp_path = storage_path + ".uploading";
-            std::remove(tmp_path.c_str());
-
-            FileUtil tmp(tmp_path);
-            bool ok = false;
-            if (compress_content)
-                ok = tmp.Compress(content, Config::GetInstance()->GetBundleFormat());
-            else
-                ok = tmp.SetContent(content.c_str(), content.size());
-
-            if (!ok)
-            {
-                std::remove(tmp_path.c_str());
-                return false;
-            }
-
-            if (std::rename(tmp_path.c_str(), storage_path.c_str()) != 0)
-            {
-                mylog::GetLogger("asynclogger")->Error("rename upload tmp error:%s", strerror(errno));
-                std::remove(tmp_path.c_str());
-                return false;
-            }
-            return true;
-        }
-
-        static bool ParseRangeHeader(const std::string &range_header, int64_t file_size, int64_t *start, int64_t *length)
-        {
-            const std::string prefix = "bytes=";
-            if (file_size <= 0 || range_header.find(prefix) != 0)
-                return false;
-
-            std::string range = range_header.substr(prefix.size());
-            if (range.find(',') != std::string::npos)
-                return false;
-
-            size_t dash_pos = range.find('-');
-            if (dash_pos == std::string::npos)
-                return false;
-
-            std::string start_str = range.substr(0, dash_pos);
-            std::string end_str = range.substr(dash_pos + 1);
-            if (start_str.empty() && end_str.empty())
-                return false;
-
-            char *endptr = nullptr;
-            if (start_str.empty())
-            {
-                errno = 0;
-                long long suffix_len = std::strtoll(end_str.c_str(), &endptr, 10);
-                if (errno != 0 || endptr == end_str.c_str() || *endptr != '\0' || suffix_len <= 0)
-                    return false;
-                if (suffix_len > file_size)
-                    suffix_len = file_size;
-                *start = file_size - suffix_len;
-                *length = suffix_len;
-                return true;
-            }
-
-            errno = 0;
-            long long parsed_start = std::strtoll(start_str.c_str(), &endptr, 10);
-            if (errno != 0 || endptr == start_str.c_str() || *endptr != '\0' || parsed_start < 0 || parsed_start >= file_size)
-                return false;
-
-            long long parsed_end = file_size - 1;
-            if (!end_str.empty())
-            {
-                errno = 0;
-                parsed_end = std::strtoll(end_str.c_str(), &endptr, 10);
-                if (errno != 0 || endptr == end_str.c_str() || *endptr != '\0' || parsed_end < parsed_start)
-                    return false;
-                if (parsed_end >= file_size)
-                    parsed_end = file_size - 1;
-            }
-
-            *start = parsed_start;
-            *length = parsed_end - parsed_start + 1;
-            return true;
-        }
-
         static void GenHandler(struct evhttp_request *req, void *arg)
         {
             std::string path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
@@ -371,7 +177,7 @@ namespace storage
                 return;
             }
 
-            if (!IsSafeFileName(filename))
+            if (!HttpUtil::IsSafeFileName(filename))
             {
                 evhttp_send_reply(req, HTTP_BADREQUEST, "illegal filename", NULL);
                 return;
@@ -421,8 +227,8 @@ namespace storage
             mylog::GetLogger("asynclogger")->Debug("storage_path:%s", storage_path.c_str());
 #endif
 
-            bool compressed = (storage_type == "deep" && !IsAlreadyCompressedFile(filename));
-            if (!WriteFileAtomically(storage_path, content, compressed))
+            bool compressed = (storage_type == "deep" && !HttpUtil::IsAlreadyCompressedFile(filename));
+            if (!HttpUtil::WriteFileAtomically(storage_path, content, compressed))
             {
                 mylog::GetLogger("asynclogger")->Error("%s storage fail, evhttp_send_reply: HTTP_INTERNAL", storage_type.c_str());
                 evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
@@ -432,8 +238,9 @@ namespace storage
 
             // 添加存储文件信息，交由数据管理类进行管理
             StorageInfo info;
-            std::string content_type = NormalizeContentType(evhttp_find_header(req->input_headers, "Content-Type"));
-            if (!info.NewStorageInfo(storage_path, storage_type, compressed, content.size(), content_type) || !data_->Insert(info))
+            std::string content_type = HttpUtil::NormalizeContentType(evhttp_find_header(req->input_headers, "Content-Type"));
+            std::string content_hash = HttpUtil::CalculateContentHash(content);
+            if (!info.NewStorageInfo(storage_path, storage_type, compressed, content.size(), content_type, content_hash, "fnv1a64") || !data_->Insert(info))
             {
                 std::remove(storage_path.c_str());
                 evhttp_send_reply(req, HTTP_INTERNAL, "save metadata failed", NULL);
@@ -444,90 +251,6 @@ namespace storage
             mylog::GetLogger("asynclogger")->Info("upload finish:success");
         }
 
-        static std::string TimetoStr(time_t t)
-        {
-            std::string tmp = std::ctime(&t);
-            if (!tmp.empty() && tmp.back() == '\n')
-                tmp.pop_back();
-            return tmp;
-        }
-
-        // 前端代码处理函数
-        // 在渲染函数中直接处理StorageInfo
-        static std::string generateModernFileList(const std::vector<StorageInfo> &files)
-        {
-            std::stringstream ss;
-            ss << "<section class='file-list' data-total='" << files.size() << "'>"
-               << "<div class='file-list-header'>"
-               << "<h2>已上传文件</h2>"
-               << "<div class='file-tools'>"
-               << "<input id='fileSearch' type='search' placeholder='搜索文件名' oninput='filterFiles()'>"
-               << "<select id='fileSort' onchange='sortFiles()'>"
-               << "<option value='upload-desc'>最近上传</option>"
-               << "<option value='name-asc'>文件名 A-Z</option>"
-               << "<option value='size-desc'>文件大小</option>"
-               << "</select>"
-               << "</div>"
-               << "</div>"
-               << "<div id='fileCount' class='file-count'></div>"
-               << "<div id='fileItems'>";
-
-            for (const auto &file : files)
-            {
-                std::string filename = FileUtil(file.storage_path_).FileName();
-                std::string escaped_filename = HtmlEscape(filename);
-                std::string encoded_filename = UrlEncodePathSegment(filename);
-                std::string escaped_url = HtmlEscape(Config::GetInstance()->GetDownloadPrefix() + encoded_filename);
-                std::string escaped_delete_url = HtmlEscape("/delete/" + encoded_filename);
-                std::string escaped_upload_time = HtmlEscape(TimetoStr(file.upload_time_));
-
-                std::string storage_type = file.storage_type_.empty() ? "low" : file.storage_type_;
-                std::string storage_label = "普通存储";
-                if (storage_type == "deep")
-                    storage_label = file.compressed_ ? "深度存储-已压缩" : "深度存储-原样保存";
-                size_t display_size = file.original_size_ == 0 ? file.fsize_ : file.original_size_;
-
-                ss << "<div class='file-item' data-name='" << escaped_filename
-                   << "' data-size='" << display_size
-                   << "' data-upload-time='" << file.upload_time_ << "'>"
-                   << "<div class='file-info'>"
-                   << "<span class='file-name'>📄" << escaped_filename << "</span>"
-                   << "<span class='file-type'>"
-                   << storage_label
-                   << "</span>"
-                   << "<span class='file-size'>" << formatSize(display_size) << "</span>"
-                   << "<span class='file-time'>上传 " << escaped_upload_time << "</span>"
-                   << "</div>"
-                   << "<div class='file-actions'>"
-                   << "<button data-url='" << escaped_url << "' onclick=\"window.location=this.dataset.url\">⬇️ 下载</button>"
-                   << "<button class='delete-button' data-url='" << escaped_delete_url << "' onclick=\"deleteFile(this.dataset.url)\">删除</button>"
-                   << "</div>"
-                   << "</div>";
-            }
-
-            ss << "</div>"
-               << "<div id='emptyState' class='empty-state'>暂无匹配文件</div>"
-               << "</section>";
-            return ss.str();
-        }
-
-        // 文件大小格式化函数
-        static std::string formatSize(uint64_t bytes)
-        {
-            const char *units[] = {"B", "KB", "MB", "GB"};
-            int unit_index = 0;
-            double size = bytes;
-
-            while (size >= 1024 && unit_index < 3)
-            {
-                size /= 1024;
-                unit_index++;
-            }
-
-            std::stringstream ss;
-            ss << std::fixed << std::setprecision(2) << size << " " << units[unit_index];
-            return ss.str();
-        }
         static void ListShow(struct evhttp_request *req, void *arg)
         {
             mylog::GetLogger("asynclogger")->Info("ListShow()");
@@ -545,7 +268,7 @@ namespace storage
             // 替换文件列表进html
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{FILE_LIST\\}\\}"),
-                                                 generateModernFileList(arry));
+                                                 PageRender::GenerateModernFileList(arry));
             // 替换服务器地址进hrml
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{BACKEND_URL\\}\\}"),
@@ -594,7 +317,7 @@ namespace storage
             }
 
             std::string filename = resource_path.substr(delete_prefix.size());
-            if (!IsSafeFileName(filename))
+            if (!HttpUtil::IsSafeFileName(filename))
             {
                 evhttp_send_reply(req, HTTP_BADREQUEST, "illegal filename", NULL);
                 return;
@@ -692,7 +415,7 @@ namespace storage
             auto if_range = evhttp_find_header(req->input_headers, "If-Range");
             if (range_header != NULL && (if_range == NULL || etag == if_range))
             {
-                if (!ParseRangeHeader(range_header, file_size, &range_start, &range_length))
+                if (!HttpUtil::ParseRangeHeader(range_header, file_size, &range_start, &range_length))
                 {
                     std::string content_range = "bytes */" + std::to_string(file_size);
                     evhttp_add_header(req->output_headers, "Content-Range", content_range.c_str());
@@ -712,8 +435,8 @@ namespace storage
                 return;
             }
             evbuffer *outbuf = evhttp_request_get_output_buffer(req);
-            int fd = open(download_path.c_str(), O_RDONLY);
-            if (fd == -1)
+            HttpUtil::UniqueFd fd(open(download_path.c_str(), O_RDONLY));
+            if (!fd.Valid())
             {
                 mylog::GetLogger("asynclogger")->Error("open file error: %s -- %s", download_path.c_str(), strerror(errno));
                 evhttp_send_reply(req, HTTP_INTERNAL, strerror(errno), NULL);
@@ -725,13 +448,13 @@ namespace storage
                 range_length = file_size;
             }
             // 和前面用的evbuffer_add类似，但是效率更高，具体原因可以看函数声明
-            if (-1 == evbuffer_add_file(outbuf, fd, range_start, range_length))
+            if (-1 == evbuffer_add_file(outbuf, fd.Get(), range_start, range_length))
             {
-                mylog::GetLogger("asynclogger")->Error("evbuffer_add_file: %d -- %s -- %s", fd, download_path.c_str(), strerror(errno));
-                close(fd);
+                mylog::GetLogger("asynclogger")->Error("evbuffer_add_file: %d -- %s -- %s", fd.Get(), download_path.c_str(), strerror(errno));
                 evhttp_send_reply(req, HTTP_INTERNAL, "add file failed", NULL);
                 return;
             }
+            fd.Release();
             // 5. 设置响应头部字段： ETag， Accept-Ranges: bytes
             evhttp_add_header(req->output_headers, "Accept-Ranges", "bytes");
             evhttp_add_header(req->output_headers, "ETag", etag.c_str());
@@ -742,6 +465,11 @@ namespace storage
             std::string stored_size = std::to_string(info.stored_size_);
             evhttp_add_header(req->output_headers, "X-Original-Size", original_size.c_str());
             evhttp_add_header(req->output_headers, "X-Stored-Size", stored_size.c_str());
+            if (!info.content_hash_.empty())
+            {
+                evhttp_add_header(req->output_headers, "X-Content-Hash", info.content_hash_.c_str());
+                evhttp_add_header(req->output_headers, "X-Hash-Algorithm", info.hash_algo_.empty() ? "fnv1a64" : info.hash_algo_.c_str());
+            }
             if (retrans)
             {
                 std::string content_range = "bytes " + std::to_string(range_start) + "-" +
