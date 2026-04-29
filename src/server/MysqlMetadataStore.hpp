@@ -21,13 +21,27 @@ namespace storage
         MYSQL *conn_;
         bool ready_;
 
-        bool Execute(const std::string &sql)
+        void LogConfigContext(const char *prefix)
+        {
+            mylog::GetLogger("asynclogger")->Error("%s host=%s, port=%d, user=%s, database=%s",
+                                                   prefix,
+                                                   config_->GetMysqlHost().c_str(),
+                                                   config_->GetMysqlPort(),
+                                                   config_->GetMysqlUser().c_str(),
+                                                   config_->GetMysqlDatabase().c_str());
+        }
+
+        bool Execute(const std::string &sql, const char *operation = "execute", const std::string &url = "")
         {
             if (!ready_)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql %s failed: connection not ready, url=%s", operation, url.c_str());
                 return false;
+            }
             if (mysql_query(conn_, sql.c_str()) != 0)
             {
-                mylog::GetLogger("asynclogger")->Error("mysql execute failed:%s, sql:%s", mysql_error(conn_), sql.c_str());
+                mylog::GetLogger("asynclogger")->Error("mysql %s failed, url=%s, error=%s, sql=%s",
+                                                       operation, url.c_str(), mysql_error(conn_), sql.c_str());
                 return false;
             }
             return true;
@@ -48,6 +62,7 @@ namespace storage
             if (conn_ == nullptr)
             {
                 mylog::GetLogger("asynclogger")->Error("mysql_init failed");
+                LogConfigContext("mysql init context:");
                 return false;
             }
 
@@ -55,6 +70,7 @@ namespace storage
             if (password == nullptr)
             {
                 mylog::GetLogger("asynclogger")->Error("mysql password env not set:%s", config_->GetMysqlPasswordEnv().c_str());
+                LogConfigContext("mysql password env missing context:");
                 return false;
             }
 
@@ -67,13 +83,15 @@ namespace storage
                                    nullptr,
                                    0) == nullptr)
             {
-                mylog::GetLogger("asynclogger")->Error("mysql connect failed:%s", mysql_error(conn_));
+                mylog::GetLogger("asynclogger")->Error("mysql connect failed, error=%s", mysql_error(conn_));
+                LogConfigContext("mysql connect context:");
                 return false;
             }
 
             if (mysql_set_character_set(conn_, "utf8mb4") != 0)
             {
-                mylog::GetLogger("asynclogger")->Error("mysql set charset failed:%s", mysql_error(conn_));
+                mylog::GetLogger("asynclogger")->Error("mysql set charset failed, error=%s", mysql_error(conn_));
+                LogConfigContext("mysql charset context:");
                 return false;
             }
             ready_ = true;
@@ -104,7 +122,8 @@ namespace storage
                 "hash_algo VARCHAR(32) NOT NULL DEFAULT '',"
                 "INDEX idx_content_hash(content_hash),"
                 "INDEX idx_upload_time(upload_time)"
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+                "create file_metadata table");
         }
 
         std::string UpsertSql(const StorageInfo &info)
@@ -198,33 +217,39 @@ namespace storage
 
         bool Insert(const StorageInfo &info) override
         {
-            return Execute(UpsertSql(info));
+            return Execute(UpsertSql(info), "insert metadata", info.url_);
         }
 
         bool Update(const StorageInfo &info) override
         {
-            return Execute(UpsertSql(info));
+            return Execute(UpsertSql(info), "update metadata", info.url_);
         }
 
         bool Delete(const std::string &key) override
         {
             std::string sql = "DELETE FROM file_metadata WHERE url='" + Escape(key) + "'";
-            return Execute(sql);
+            return Execute(sql, "delete metadata", key);
         }
 
         bool GetOneByURL(const std::string &key, StorageInfo *info) override
         {
             if (!ready_)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql get metadata by url failed: connection not ready, url=%s", key.c_str());
                 return false;
+            }
             std::string sql = "SELECT " + SelectColumns() + " FROM file_metadata WHERE url='" + Escape(key) + "' LIMIT 1";
             if (mysql_query(conn_, sql.c_str()) != 0)
             {
-                mylog::GetLogger("asynclogger")->Error("mysql query failed:%s", mysql_error(conn_));
+                mylog::GetLogger("asynclogger")->Error("mysql get metadata by url failed, url=%s, error=%s", key.c_str(), mysql_error(conn_));
                 return false;
             }
             MYSQL_RES *result = mysql_store_result(conn_);
             if (result == nullptr)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql store result failed for get metadata by url, url=%s, error=%s", key.c_str(), mysql_error(conn_));
                 return false;
+            }
             MYSQL_ROW row = mysql_fetch_row(result);
             bool ok = FillInfo(row, info);
             mysql_free_result(result);
@@ -234,16 +259,22 @@ namespace storage
         bool GetAll(std::vector<StorageInfo> *arry) override
         {
             if (!ready_)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql get all metadata failed: connection not ready");
                 return false;
+            }
             std::string sql = "SELECT " + SelectColumns() + " FROM file_metadata";
             if (mysql_query(conn_, sql.c_str()) != 0)
             {
-                mylog::GetLogger("asynclogger")->Error("mysql query failed:%s", mysql_error(conn_));
+                mylog::GetLogger("asynclogger")->Error("mysql get all metadata failed, error=%s", mysql_error(conn_));
                 return false;
             }
             MYSQL_RES *result = mysql_store_result(conn_);
             if (result == nullptr)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql store result failed for get all metadata, error=%s", mysql_error(conn_));
                 return false;
+            }
             MYSQL_ROW row;
             while ((row = mysql_fetch_row(result)) != nullptr)
             {
@@ -257,22 +288,22 @@ namespace storage
 
         bool SaveAll(const std::vector<StorageInfo> &arry) override
         {
-            if (!Execute("START TRANSACTION"))
+            if (!Execute("START TRANSACTION", "start metadata save transaction"))
                 return false;
-            if (!Execute("DELETE FROM file_metadata"))
+            if (!Execute("DELETE FROM file_metadata", "clear metadata table"))
             {
-                Execute("ROLLBACK");
+                Execute("ROLLBACK", "rollback metadata save transaction");
                 return false;
             }
             for (const auto &info : arry)
             {
-                if (!Execute(UpsertSql(info)))
+                if (!Execute(UpsertSql(info), "save metadata item", info.url_))
                 {
-                    Execute("ROLLBACK");
+                    Execute("ROLLBACK", "rollback metadata save transaction");
                     return false;
                 }
             }
-            return Execute("COMMIT");
+            return Execute("COMMIT", "commit metadata save transaction");
         }
     };
 #else

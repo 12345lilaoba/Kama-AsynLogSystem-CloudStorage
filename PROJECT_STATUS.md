@@ -369,6 +369,12 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
   - 历史 JSON 元数据不再迁移到 MySQL。
   - 旧测试数据已清空，后续从干净状态继续验证。
   - 如后续需要重新清理，可删除 `storage.data`、清空 `low_storage` / `deep_storage`，并对 MySQL 执行 `TRUNCATE TABLE file_metadata;`。
+- 2026-04-29 MySQL 错误日志增强：
+  - 连接未就绪时，增删改查会记录具体操作和 URL。
+  - MySQL 连接失败时记录 host、port、user、database 等上下文，不记录密码。
+  - 环境变量缺失时明确记录变量名和连接上下文。
+  - 建表、插入、更新、删除、查询和事务提交/回滚失败时记录具体操作。
+  - `make` 编译通过。
 
 注意：当前 `8081` 上已有一个 `test` 服务端进程在监听，本轮验证复用了该进程，没有额外启动第二个服务端。
 
@@ -388,16 +394,17 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - 当前已新增 `MysqlMetadataStore` 代码，默认继续使用 `json` 元数据后端。
 - 当前已完成 MySQL 后端真实编译和上传、下载、删除功能验证。
 - 历史测试数据已清空，不再做 JSON 到 MySQL 迁移工具。
-- 下一步建议增强 MySQL 后端错误日志，提升排错体验。
+- 当前已完成 MySQL 后端错误日志增强。
+- 下一步建议提交当前 MySQL 错误日志增强改动，然后进入文件列表分页或基于 hash 的重复上传检测。
 
 ## 7. 下一步计划
 
 ### 优先级 P0：提交当前小阶段
 
-1. 再查看一次 `git diff --stat`，确认只包含项目状态文档更新。
+1. 再查看一次 `git diff --stat`，确认只包含 MySQL 错误日志和项目状态文档更新。
 2. 再跑一次 `git diff --check`。
 3. 提交当前小阶段，建议 commit message：
-   - `Document clean MySQL metadata baseline`
+   - `Improve MySQL metadata error logging`
 
 ### 优先级 P1：MySQL 元数据接口抽象
 
@@ -419,7 +426,7 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
   - 为 `url`、`content_hash`、`upload_time` 建索引。
 - MySQL 后端已完成真实编译和 curl 功能验证。
 - 不做历史元数据迁移，旧测试数据已清空。
-- 下一步增强 MySQL 错误日志：
+- MySQL 错误日志已增强：
   - 连接失败时记录 host、port、user、database，不记录密码。
   - 环境变量缺失时明确提示变量名。
   - 建表、插入、更新、删除失败时记录操作和 URL。
