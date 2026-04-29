@@ -15,6 +15,7 @@ namespace storage
         std::string deep_storage_dir_;     // 深度存储文件的存储路径
         std::string low_storage_dir_;     // 浅度存储文件的存储路径
         std::string storage_info_;     // 已存储文件的信息
+        std::string metadata_store_;   // 元数据存储后端：json / mysql
         int bundle_format_;//深度存储的文件后缀，由选择的压缩格式确定
         size_t max_upload_size_; // 单次上传允许的最大文件大小
     private:
@@ -55,6 +56,7 @@ namespace storage
             deep_storage_dir_ = root["deep_storage_dir"].asString();
             low_storage_dir_ = root["low_storage_dir"].asString();
             bundle_format_ = root["bundle_format"].asInt();
+            metadata_store_ = root.get("metadata_store", "json").asString();
             max_upload_size_ = root.get("max_upload_size", 100 * 1024 * 1024).asUInt64();
             
             return true;
@@ -86,6 +88,10 @@ namespace storage
         std::string GetStorageInfoFile()
         {
             return storage_info_;
+        }
+        std::string GetMetadataStoreType()
+        {
+            return metadata_store_;
         }
         size_t GetMaxUploadSize()
         {

@@ -193,7 +193,8 @@ Kama-AsynLogSystem-CloudStorage/
 - `Storage.conf` 新增：
 
 ```json
-"max_upload_size" : 104857600
+"max_upload_size" : 104857600,
+"metadata_store" : "json"
 ```
 
 - `log_system/logs_code/config.conf` 新增：
@@ -286,6 +287,8 @@ Kama-AsynLogSystem-CloudStorage/
   - 保留内存缓存 `table_` 和读写锁。
   - 初始化时从 `MetadataStore` 加载元数据。
   - 插入、更新、删除时通过 `MetadataStore` 持久化。
+  - 通过 `Config::GetMetadataStoreType()` 选择元数据后端。
+  - 当前支持配置值 `json`，未知值会记录警告并回退到 `JsonMetadataStore`。
   - 后续切换 MySQL 时，优先新增 `MysqlMetadataStore`，尽量不改动 `Service` 层。
 
 ## 5. 已验证的功能
@@ -367,16 +370,17 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - `Service.hpp` 已拆出 `HttpUtil.hpp` 和 `PageRender.hpp`，编译通过。
 - 阶段 1 的 C++ 工程化增强已完成第一轮：RAII 管理 libevent 资源、fd 和读写锁。
 - 当前已开始 MySQL 元数据接口抽象第一步，新增 `MetadataStore` / `JsonMetadataStore`。
-- 下一步建议先提交当前元数据接口抽象改动，再继续实现 `MysqlMetadataStore`。
+- 当前已新增 `metadata_store` 配置项，默认继续使用 `json` 元数据后端。
+- 下一步建议提交当前可配置元数据后端选择改动，再继续实现 `MysqlMetadataStore`。
 
 ## 7. 下一步计划
 
 ### 优先级 P0：提交当前小阶段
 
-1. 再查看一次 `git diff --stat`，确认只包含 hash 元数据和 `Service.hpp` 拆分相关改动。
+1. 再查看一次 `git diff --stat`，确认只包含可配置元数据后端选择相关改动。
 2. 再跑一次 `git diff --check`。
 3. 提交当前小阶段，建议 commit message：
-   - `Add file hash metadata and improve C++ resource management`
+   - `Add configurable metadata store selection`
 
 ### 优先级 P1：MySQL 元数据接口抽象
 
@@ -390,6 +394,8 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
   - `GetAll`
 - 将当前 `storage.data` JSON 持久化逻辑迁移为 `JsonMetadataStore`：已开始。
 - `DataManager` 负责内存缓存和并发保护，底层持久化通过 `MetadataStore` 完成：已开始。
+- `Storage.conf` 支持配置 `metadata_store`：已开始，当前默认 `json`。
+- `DataManager` 根据配置选择元数据后端：已开始，当前未知配置会回退到 `JsonMetadataStore`。
 - 下一步再新增 `MysqlMetadataStore`：
   - 封装 MySQL 连接。
   - 使用预编译 SQL 或清晰的 SQL 封装。

@@ -50,11 +50,22 @@ namespace storage
         std::unordered_map<std::string, StorageInfo> table_;
         bool need_persist_;
 
+        std::unique_ptr<MetadataStore> CreateMetadataStore()
+        {
+            storage::Config *config = storage::Config::GetInstance();
+            std::string store_type = config->GetMetadataStoreType();
+            if (store_type != "json")
+            {
+                mylog::GetLogger("asynclogger")->Warn("unsupported metadata_store:%s, fallback to json", store_type.c_str());
+            }
+            return std::unique_ptr<MetadataStore>(new JsonMetadataStore(config->GetStorageInfoFile()));
+        }
+
     public:
         DataManager()
         {
             mylog::GetLogger("asynclogger")->Info("DataManager construct start");
-            metadata_store_.reset(new JsonMetadataStore(storage::Config::GetInstance()->GetStorageInfoFile()));
+            metadata_store_ = CreateMetadataStore();
             pthread_rwlock_init(&rwlock_, NULL);
             need_persist_ = false;
             InitLoad();
