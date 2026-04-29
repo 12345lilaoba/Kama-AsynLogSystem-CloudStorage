@@ -358,8 +358,13 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - 2026-04-29 MySQL 元数据阶段验证：
   - 已提交 `Add configurable metadata store selection`。
   - 新增 MySQL 非敏感配置项和 `MysqlMetadataStore` 代码。
-  - 当前环境未安装 `libmysqlclient-dev`，因此真实 MySQL C API 路径尚未完成编译验证。
-  - 默认 `metadata_store=json` 下 `make` 编译通过，不影响现有 JSON 元数据后端。
+  - 安装 `libmysqlclient-dev` 后，`mysql_config --cflags` 和 `mysql_config --libs` 可用。
+  - `make clean && make` 已通过真实 MySQL C API 编译和链接验证。
+  - 修复 `MysqlMetadataStore::Connect` 初始化顺序，确保连接成功后能自动创建 `file_metadata` 表。
+  - 本地切换 `metadata_store=mysql` 并设置 `CLOUD_STORAGE_MYSQL_PASSWORD` 后，上传测试文件成功写入 MySQL `file_metadata`。
+  - 已验证 MySQL 后端下载返回原始内容。
+  - 已验证 MySQL 后端删除文件后同步删除元数据记录。
+  - 默认配置已恢复 `metadata_store=json`，避免没有 MySQL 环境时影响默认启动。
 
 注意：当前 `8081` 上已有一个 `test` 服务端进程在监听，本轮验证复用了该进程，没有额外启动第二个服务端。
 
@@ -370,10 +375,7 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 当前仍有未提交源码改动：
 
 - `PROJECT_STATUS.md`
-- `src/server/DataManager.hpp`
-- `src/server/Service.hpp`
-- `src/server/HttpUtil.hpp`
-- `src/server/PageRender.hpp`
+- `src/server/Storage.conf`
 
 当前阶段已经完成但还需要最终收口的点：
 
@@ -383,7 +385,8 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - 当前已提交 `MetadataStore` / `JsonMetadataStore` 抽象改动。
 - 当前已提交可配置元数据后端选择改动。
 - 当前已新增 `MysqlMetadataStore` 代码，默认继续使用 `json` 元数据后端。
-- 下一步建议安装 `libmysqlclient-dev`，设置 `CLOUD_STORAGE_MYSQL_PASSWORD`，切换 `metadata_store=mysql` 后做真实 MySQL 编译和功能验证。
+- 当前已完成 MySQL 后端真实编译和上传、下载、删除功能验证。
+- 下一步建议提交当前 MySQL 验证收口文档和默认配置恢复。
 
 ## 7. 下一步计划
 
