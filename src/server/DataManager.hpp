@@ -1,5 +1,6 @@
 #pragma once
 #include "MetadataStore.hpp"
+#include "MysqlMetadataStore.hpp"
 #include <cstdio>
 #include <memory>
 #include <unordered_map>
@@ -54,6 +55,10 @@ namespace storage
         {
             storage::Config *config = storage::Config::GetInstance();
             std::string store_type = config->GetMetadataStoreType();
+            if (store_type == "mysql")
+            {
+                return std::unique_ptr<MetadataStore>(new MysqlMetadataStore(config));
+            }
             if (store_type != "json")
             {
                 mylog::GetLogger("asynclogger")->Warn("unsupported metadata_store:%s, fallback to json", store_type.c_str());

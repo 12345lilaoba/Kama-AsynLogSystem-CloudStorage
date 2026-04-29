@@ -288,8 +288,14 @@ Kama-AsynLogSystem-CloudStorage/
   - 初始化时从 `MetadataStore` 加载元数据。
   - 插入、更新、删除时通过 `MetadataStore` 持久化。
   - 通过 `Config::GetMetadataStoreType()` 选择元数据后端。
-  - 当前支持配置值 `json`，未知值会记录警告并回退到 `JsonMetadataStore`。
-  - 后续切换 MySQL 时，优先新增 `MysqlMetadataStore`，尽量不改动 `Service` 层。
+  - 当前支持配置值 `json` 和 `mysql`，未知值会记录警告并回退到 `JsonMetadataStore`。
+- 新增 `src/server/MysqlMetadataStore.hpp`：
+  - 使用 MySQL C API 封装连接、自动建表、插入/更新、删除、按 URL 查询、全量查询和全量保存。
+  - 表名为 `file_metadata`。
+  - 字段对应 `StorageInfo` 当前元数据结构。
+  - 为 `url` 建主键，为 `content_hash` 和 `upload_time` 建索引。
+  - 密码不写入配置文件，通过 `mysql_password_env` 指定的环境变量读取，默认 `CLOUD_STORAGE_MYSQL_PASSWORD`。
+  - 当前源码支持条件编译：未安装 MySQL 开发包时仍可按 JSON 后端正常编译；安装 `libmysqlclient-dev` 后会通过 `mysql_config` 自动加入编译和链接参数。
 
 ## 5. 已验证的功能
 
@@ -349,6 +355,11 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - 2026-04-29 C++ 工程化验证：
   - `event_base`、`evhttp`、下载文件 fd、元数据读写锁已做 RAII 化。
   - `make` 编译通过。
+- 2026-04-29 MySQL 元数据阶段验证：
+  - 已提交 `Add configurable metadata store selection`。
+  - 新增 MySQL 非敏感配置项和 `MysqlMetadataStore` 代码。
+  - 当前环境未安装 `libmysqlclient-dev`，因此真实 MySQL C API 路径尚未完成编译验证。
+  - 默认 `metadata_store=json` 下 `make` 编译通过，不影响现有 JSON 元数据后端。
 
 注意：当前 `8081` 上已有一个 `test` 服务端进程在监听，本轮验证复用了该进程，没有额外启动第二个服务端。
 
@@ -369,18 +380,19 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - hash 元数据已实现并验证。
 - `Service.hpp` 已拆出 `HttpUtil.hpp` 和 `PageRender.hpp`，编译通过。
 - 阶段 1 的 C++ 工程化增强已完成第一轮：RAII 管理 libevent 资源、fd 和读写锁。
-- 当前已开始 MySQL 元数据接口抽象第一步，新增 `MetadataStore` / `JsonMetadataStore`。
-- 当前已新增 `metadata_store` 配置项，默认继续使用 `json` 元数据后端。
-- 下一步建议提交当前可配置元数据后端选择改动，再继续实现 `MysqlMetadataStore`。
+- 当前已提交 `MetadataStore` / `JsonMetadataStore` 抽象改动。
+- 当前已提交可配置元数据后端选择改动。
+- 当前已新增 `MysqlMetadataStore` 代码，默认继续使用 `json` 元数据后端。
+- 下一步建议安装 `libmysqlclient-dev`，设置 `CLOUD_STORAGE_MYSQL_PASSWORD`，切换 `metadata_store=mysql` 后做真实 MySQL 编译和功能验证。
 
 ## 7. 下一步计划
 
 ### 优先级 P0：提交当前小阶段
 
-1. 再查看一次 `git diff --stat`，确认只包含可配置元数据后端选择相关改动。
+1. 再查看一次 `git diff --stat`，确认只包含 MySQL 元数据后端相关改动。
 2. 再跑一次 `git diff --check`。
 3. 提交当前小阶段，建议 commit message：
-   - `Add configurable metadata store selection`
+   - `Add MySQL metadata store implementation`
 
 ### 优先级 P1：MySQL 元数据接口抽象
 
@@ -396,10 +408,11 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - `DataManager` 负责内存缓存和并发保护，底层持久化通过 `MetadataStore` 完成：已开始。
 - `Storage.conf` 支持配置 `metadata_store`：已开始，当前默认 `json`。
 - `DataManager` 根据配置选择元数据后端：已开始，当前未知配置会回退到 `JsonMetadataStore`。
-- 下一步再新增 `MysqlMetadataStore`：
+- 新增 `MysqlMetadataStore`：已开始。
   - 封装 MySQL 连接。
-  - 使用预编译 SQL 或清晰的 SQL 封装。
+  - 使用清晰的 SQL 封装，并对字符串做 MySQL 转义。
   - 为 `url`、`content_hash`、`upload_time` 建索引。
+  - 后续安装开发包后需做真实 MySQL 编译和 curl 功能验证。
 
 ### 优先级 P1：线程库能力增强
 

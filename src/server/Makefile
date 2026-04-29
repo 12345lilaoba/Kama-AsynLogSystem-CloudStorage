@@ -1,5 +1,7 @@
-CXXFLAGS=-std=c++17
-LDFLAGS=-lpthread -lstdc++fs -ljsoncpp -lbundle -levent
+MYSQL_CFLAGS=$(shell mysql_config --cflags 2>/dev/null)
+MYSQL_LDFLAGS=$(shell mysql_config --libs 2>/dev/null)
+CXXFLAGS=-std=c++17 $(MYSQL_CFLAGS)
+LDFLAGS=-lpthread -lstdc++fs -ljsoncpp -lbundle -levent $(MYSQL_LDFLAGS)
 DEPS=$(wildcard *.hpp ../../log_system/logs_code/*.hpp)
 
 test:Test.cpp base64.cpp $(DEPS)
