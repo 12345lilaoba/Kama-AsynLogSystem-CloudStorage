@@ -76,7 +76,13 @@ namespace storage
                 mylog::GetLogger("asynclogger")->Error("mysql set charset failed:%s", mysql_error(conn_));
                 return false;
             }
-            return EnsureTable();
+            ready_ = true;
+            if (!EnsureTable())
+            {
+                ready_ = false;
+                return false;
+            }
+            return true;
         }
 
         bool EnsureTable()
