@@ -268,6 +268,26 @@ Kama-AsynLogSystem-CloudStorage/
   - 避免包含 `pthread_rwlock_t` 的管理类被误拷贝。
 - `GetOneByURL` 改为使用 `find` 迭代器读取，避免在读锁保护下使用 `operator[]`。
 
+### 4.8 MySQL 元数据接口抽象起步
+
+已开始 P1 的元数据存储抽象，为后续 MySQL 元数据存储做铺垫：
+
+- 新增 `src/server/StorageInfo.hpp`：
+  - 将 `StorageInfo` 从 `DataManager.hpp` 拆出。
+  - `Service.hpp`、`PageRender.hpp` 等业务代码仍可通过 `DataManager.hpp` 间接使用 `StorageInfo`，外部调用方式保持不变。
+- 新增 `src/server/MetadataStore.hpp`：
+  - 定义 `MetadataStore` 抽象接口。
+  - 当前接口包含 `Insert`、`Update`、`Delete`、`GetOneByURL`、`GetAll`、`SaveAll`。
+  - `SaveAll` 用于保留当前 JSON 全量落盘语义，避免 `DataManager::Storage` 通过循环 `Update` 多次写文件。
+- 新增 `JsonMetadataStore`：
+  - 承接原来 `DataManager` 中的 `storage.data` 读取、JSON 反序列化、兼容旧字段、序列化和临时文件原子替换逻辑。
+  - 继续兼容旧元数据字段和 hash 元数据字段。
+- `DataManager` 调整职责：
+  - 保留内存缓存 `table_` 和读写锁。
+  - 初始化时从 `MetadataStore` 加载元数据。
+  - 插入、更新、删除时通过 `MetadataStore` 持久化。
+  - 后续切换 MySQL 时，优先新增 `MysqlMetadataStore`，尽量不改动 `Service` 层。
+
 ## 5. 已验证的功能
 
 在 `src/server` 下编译通过：
@@ -346,7 +366,8 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - hash 元数据已实现并验证。
 - `Service.hpp` 已拆出 `HttpUtil.hpp` 和 `PageRender.hpp`，编译通过。
 - 阶段 1 的 C++ 工程化增强已完成第一轮：RAII 管理 libevent 资源、fd 和读写锁。
-- 下一步建议先提交当前 hash、拆分和 RAII 改动，再进入 MySQL 元数据阶段。
+- 当前已开始 MySQL 元数据接口抽象第一步，新增 `MetadataStore` / `JsonMetadataStore`。
+- 下一步建议先提交当前元数据接口抽象改动，再继续实现 `MysqlMetadataStore`。
 
 ## 7. 下一步计划
 
@@ -361,13 +382,14 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 
 后续要更贴近 C++ 后端岗位，建议优先把当前 JSON 元数据存储抽象成接口，为 MySQL 做准备：
 
-- 新增 `MetadataStore` 抽象接口：
+- 新增 `MetadataStore` 抽象接口：已开始。
   - `Insert`
+  - `Update`
   - `Delete`
   - `GetOneByURL`
   - `GetAll`
-- 将当前 `storage.data` JSON 持久化逻辑迁移为 `JsonMetadataStore`。
-- `DataManager` 负责内存缓存和并发保护，底层持久化通过 `MetadataStore` 完成。
+- 将当前 `storage.data` JSON 持久化逻辑迁移为 `JsonMetadataStore`：已开始。
+- `DataManager` 负责内存缓存和并发保护，底层持久化通过 `MetadataStore` 完成：已开始。
 - 下一步再新增 `MysqlMetadataStore`：
   - 封装 MySQL 连接。
   - 使用预编译 SQL 或清晰的 SQL 封装。
