@@ -395,16 +395,27 @@ g++ -o test Test.cpp base64.cpp -std=c++17 -lpthread -lstdc++fs -ljsoncpp -lbund
 - 当前已完成 MySQL 后端真实编译和上传、下载、删除功能验证。
 - 历史测试数据已清空，不再做 JSON 到 MySQL 迁移工具。
 - 当前已完成 MySQL 后端错误日志增强。
-- 下一步建议提交当前 MySQL 错误日志增强改动，然后进入文件列表分页或基于 hash 的重复上传检测。
+- 当前已开始文件列表后端分页，作为项目收尾功能。
+- 下一步建议提交分页改动后进入整体收尾和面试讲解整理。
 
 ## 7. 下一步计划
 
 ### 优先级 P0：提交当前小阶段
 
-1. 再查看一次 `git diff --stat`，确认只包含 MySQL 错误日志和项目状态文档更新。
+1. 再查看一次 `git diff --stat`，确认只包含文件列表分页和项目状态文档更新。
 2. 再跑一次 `git diff --check`。
 3. 提交当前小阶段，建议 commit message：
-   - `Improve MySQL metadata error logging`
+   - `Add server-side file list pagination`
+
+### 优先级 P1：文件列表分页收尾
+
+当前分页目标保持简单，避免项目复杂度继续膨胀：
+
+- 列表页支持 `page` 和 `page_size` 查询参数，例如 `/?page=2&page_size=10`。
+- 服务端按上传时间倒序排序后，只渲染当前页文件。
+- 页面底部提供上一页、下一页链接。
+- 前端搜索和排序仅作为当前页内的辅助功能，不继续扩展成后端搜索/排序。
+- 默认每页 10 条，最大 `page_size` 限制为 100，避免单页渲染过大。
 
 ### 优先级 P1：MySQL 元数据接口抽象
 

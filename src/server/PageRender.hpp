@@ -38,10 +38,24 @@ namespace storage
             return ss.str();
         }
 
-        static std::string GenerateModernFileList(const std::vector<StorageInfo> &files)
+        static std::string BuildPageLink(size_t page, size_t page_size)
         {
             std::stringstream ss;
-            ss << "<section class='file-list' data-total='" << files.size() << "'>"
+            ss << "/?page=" << page << "&page_size=" << page_size;
+            return ss.str();
+        }
+
+        static std::string GenerateModernFileList(const std::vector<StorageInfo> &files,
+                                                  size_t total_files,
+                                                  size_t current_page,
+                                                  size_t page_size)
+        {
+            size_t page_count = total_files == 0 ? 1 : (total_files + page_size - 1) / page_size;
+            if (current_page > page_count)
+                current_page = page_count;
+
+            std::stringstream ss;
+            ss << "<section class='file-list' data-total='" << total_files << "'>"
                << "<div class='file-list-header'>"
                << "<h2>已上传文件</h2>"
                << "<div class='file-tools'>"
@@ -91,6 +105,20 @@ namespace storage
 
             ss << "</div>"
                << "<div id='emptyState' class='empty-state'>暂无匹配文件</div>"
+               << "<div class='pagination'>";
+            if (current_page > 1)
+                ss << "<a href='" << BuildPageLink(current_page - 1, page_size) << "'>上一页</a>";
+            else
+                ss << "<span class='page-disabled'>上一页</span>";
+
+            ss << "<span>第 " << current_page << " / " << page_count << " 页</span>";
+
+            if (current_page < page_count)
+                ss << "<a href='" << BuildPageLink(current_page + 1, page_size) << "'>下一页</a>";
+            else
+                ss << "<span class='page-disabled'>下一页</span>";
+
+            ss << "</div>"
                << "</section>";
             return ss.str();
         }

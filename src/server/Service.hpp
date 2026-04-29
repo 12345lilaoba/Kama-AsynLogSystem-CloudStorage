@@ -15,6 +15,8 @@
 
 #include <memory>
 #include <regex>
+#include <algorithm>
+#include <cstdlib>
 
 #include "base64.h" // 来自 cpp-base64 库
 
@@ -119,6 +121,41 @@ namespace storage
             {
                 evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
             }
+        }
+
+        static bool ParseSizeParam(const std::string &query, const std::string &key, size_t *value)
+        {
+            std::string token = key + "=";
+            size_t pos = query.find(token);
+            if (pos == std::string::npos)
+                return false;
+            pos += token.size();
+            size_t end = query.find('&', pos);
+            std::string raw = query.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            if (raw.empty())
+                return false;
+
+            char *parse_end = nullptr;
+            unsigned long parsed = std::strtoul(raw.c_str(), &parse_end, 10);
+            if (parse_end == raw.c_str() || *parse_end != '\0' || parsed == 0)
+                return false;
+
+            *value = parsed;
+            return true;
+        }
+
+        static void ParsePagination(const char *query, size_t *page, size_t *page_size)
+        {
+            if (query == nullptr)
+                return;
+
+            std::string query_str = query;
+            ParseSizeParam(query_str, "page", page);
+            ParseSizeParam(query_str, "page_size", page_size);
+            if (*page_size < 1)
+                *page_size = 10;
+            if (*page_size > 100)
+                *page_size = 100;
         }
 
         static void Upload(struct evhttp_request *req, void *arg)
@@ -257,6 +294,25 @@ namespace storage
             // 1. 获取所有的文件存储信息
             std::vector<StorageInfo> arry;
             data_->GetAll(&arry);
+            std::sort(arry.begin(), arry.end(), [](const StorageInfo &left, const StorageInfo &right) {
+                return left.upload_time_ > right.upload_time_;
+            });
+
+            size_t page = 1;
+            size_t page_size = 10;
+            const char *query = evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req));
+            ParsePagination(query, &page, &page_size);
+
+            size_t total = arry.size();
+            size_t page_count = total == 0 ? 1 : (total + page_size - 1) / page_size;
+            if (page > page_count)
+                page = page_count;
+
+            size_t begin = (page - 1) * page_size;
+            size_t end = std::min(begin + page_size, total);
+            std::vector<StorageInfo> page_files;
+            if (begin < end)
+                page_files.assign(arry.begin() + begin, arry.begin() + end);
 
             // 读取模板文件
             std::ifstream templateFile("index.html");
@@ -268,7 +324,7 @@ namespace storage
             // 替换文件列表进html
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{FILE_LIST\\}\\}"),
-                                                 PageRender::GenerateModernFileList(arry));
+                                                 PageRender::GenerateModernFileList(page_files, total, page, page_size));
             // 替换服务器地址进hrml
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{BACKEND_URL\\}\\}"),
