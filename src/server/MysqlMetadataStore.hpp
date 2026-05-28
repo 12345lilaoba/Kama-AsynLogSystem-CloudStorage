@@ -105,12 +105,10 @@ namespace storage
 
         bool EnsureTable()
         {
-            return Execute(
+            if (!Execute(
                 "CREATE TABLE IF NOT EXISTS file_metadata ("
                 "url VARCHAR(768) NOT NULL PRIMARY KEY,"
                 "storage_path VARCHAR(2048) NOT NULL,"
-                "storage_type VARCHAR(16) NOT NULL,"
-                "compressed TINYINT(1) NOT NULL DEFAULT 0,"
                 "fsize BIGINT UNSIGNED NOT NULL DEFAULT 0,"
                 "original_size BIGINT UNSIGNED NOT NULL DEFAULT 0,"
                 "stored_size BIGINT UNSIGNED NOT NULL DEFAULT 0,"
@@ -118,45 +116,38 @@ namespace storage
                 "atime BIGINT NOT NULL DEFAULT 0,"
                 "upload_time BIGINT NOT NULL DEFAULT 0,"
                 "content_type VARCHAR(255) NOT NULL DEFAULT 'application/octet-stream',"
-                "content_hash VARCHAR(128) NOT NULL DEFAULT '',"
-                "hash_algo VARCHAR(32) NOT NULL DEFAULT '',"
-                "INDEX idx_content_hash(content_hash),"
                 "INDEX idx_upload_time(upload_time)"
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-                "create file_metadata table");
+                "create file_metadata table"))
+            {
+                return false;
+            }
+            return true;
         }
 
         std::string UpsertSql(const StorageInfo &info)
         {
             std::ostringstream oss;
             oss << "INSERT INTO file_metadata "
-                << "(url,storage_path,storage_type,compressed,fsize,original_size,stored_size,mtime,atime,upload_time,content_type,content_hash,hash_algo) VALUES ("
+                << "(url,storage_path,fsize,original_size,stored_size,mtime,atime,upload_time,content_type) VALUES ("
                 << "'" << Escape(info.url_) << "',"
                 << "'" << Escape(info.storage_path_) << "',"
-                << "'" << Escape(info.storage_type_) << "',"
-                << (info.compressed_ ? 1 : 0) << ","
                 << info.fsize_ << ","
                 << info.original_size_ << ","
                 << info.stored_size_ << ","
                 << (long long)info.mtime_ << ","
                 << (long long)info.atime_ << ","
                 << (long long)info.upload_time_ << ","
-                << "'" << Escape(info.content_type_) << "',"
-                << "'" << Escape(info.content_hash_) << "',"
-                << "'" << Escape(info.hash_algo_) << "') "
+                << "'" << Escape(info.content_type_) << "') "
                 << "ON DUPLICATE KEY UPDATE "
                 << "storage_path=VALUES(storage_path),"
-                << "storage_type=VALUES(storage_type),"
-                << "compressed=VALUES(compressed),"
                 << "fsize=VALUES(fsize),"
                 << "original_size=VALUES(original_size),"
                 << "stored_size=VALUES(stored_size),"
                 << "mtime=VALUES(mtime),"
                 << "atime=VALUES(atime),"
                 << "upload_time=VALUES(upload_time),"
-                << "content_type=VALUES(content_type),"
-                << "content_hash=VALUES(content_hash),"
-                << "hash_algo=VALUES(hash_algo)";
+                << "content_type=VALUES(content_type)";
             return oss.str();
         }
 
@@ -181,23 +172,41 @@ namespace storage
                 return false;
             info->url_ = ToString(row[0]);
             info->storage_path_ = ToString(row[1]);
-            info->storage_type_ = ToString(row[2]);
-            info->compressed_ = ToInt64(row[3]) != 0;
-            info->fsize_ = ToUInt64(row[4]);
-            info->original_size_ = ToUInt64(row[5]);
-            info->stored_size_ = ToUInt64(row[6]);
-            info->mtime_ = (time_t)ToInt64(row[7]);
-            info->atime_ = (time_t)ToInt64(row[8]);
-            info->upload_time_ = (time_t)ToInt64(row[9]);
-            info->content_type_ = ToString(row[10]);
-            info->content_hash_ = ToString(row[11]);
-            info->hash_algo_ = ToString(row[12]);
+            info->fsize_ = ToUInt64(row[2]);
+            info->original_size_ = ToUInt64(row[3]);
+            info->stored_size_ = ToUInt64(row[4]);
+            info->mtime_ = (time_t)ToInt64(row[5]);
+            info->atime_ = (time_t)ToInt64(row[6]);
+            info->upload_time_ = (time_t)ToInt64(row[7]);
+            info->content_type_ = ToString(row[8]);
             return true;
         }
 
         std::string SelectColumns()
         {
-            return "url,storage_path,storage_type,compressed,fsize,original_size,stored_size,mtime,atime,upload_time,content_type,content_hash,hash_algo";
+            return "url,storage_path,fsize,original_size,stored_size,mtime,atime,upload_time,content_type";
+        }
+
+        std::string ListWhereSql(const std::string &keyword)
+        {
+            if (keyword.empty())
+                return "";
+            return " WHERE storage_path LIKE '%" + Escape(keyword) + "%'";
+        }
+
+        std::string ListOrderBySql(const std::string &sort)
+        {
+            if (sort == "name-asc")
+                return " ORDER BY storage_path ASC, url ASC";
+            if (sort == "name-desc")
+                return " ORDER BY storage_path DESC, url DESC";
+            if (sort == "size-asc")
+                return " ORDER BY CASE WHEN original_size=0 THEN fsize ELSE original_size END ASC, url ASC";
+            if (sort == "size-desc")
+                return " ORDER BY CASE WHEN original_size=0 THEN fsize ELSE original_size END DESC, url ASC";
+            if (sort == "upload-asc")
+                return " ORDER BY upload_time ASC, url ASC";
+            return " ORDER BY upload_time DESC, url ASC";
         }
 
     public:
@@ -286,25 +295,72 @@ namespace storage
             return true;
         }
 
-        bool SaveAll(const std::vector<StorageInfo> &arry) override
+        bool QueryList(const std::string &keyword, const std::string &sort, size_t *page, size_t page_size, std::vector<StorageInfo> *files, size_t *total) override
         {
-            if (!Execute("START TRANSACTION", "start metadata save transaction"))
-                return false;
-            if (!Execute("DELETE FROM file_metadata", "clear metadata table"))
+            if (!ready_)
             {
-                Execute("ROLLBACK", "rollback metadata save transaction");
+                mylog::GetLogger("asynclogger")->Error("mysql query list failed: connection not ready");
                 return false;
             }
-            for (const auto &info : arry)
+            if (page == nullptr || files == nullptr || total == nullptr || page_size == 0)
+                return false;
+
+            std::string where = ListWhereSql(keyword);
+            std::string count_sql = "SELECT COUNT(*) FROM file_metadata" + where;
+            if (mysql_query(conn_, count_sql.c_str()) != 0)
             {
-                if (!Execute(UpsertSql(info), "save metadata item", info.url_))
-                {
-                    Execute("ROLLBACK", "rollback metadata save transaction");
-                    return false;
-                }
+                mylog::GetLogger("asynclogger")->Error("mysql query list count failed, error=%s", mysql_error(conn_));
+                return false;
             }
-            return Execute("COMMIT", "commit metadata save transaction");
+
+            MYSQL_RES *count_result = mysql_store_result(conn_);
+            if (count_result == nullptr)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql store result failed for list count, error=%s", mysql_error(conn_));
+                return false;
+            }
+            MYSQL_ROW count_row = mysql_fetch_row(count_result);
+            *total = count_row == nullptr ? 0 : (size_t)ToUInt64(count_row[0]);
+            mysql_free_result(count_result);
+
+            size_t page_count = *total == 0 ? 1 : (*total + page_size - 1) / page_size;
+            if (*page < 1)
+                *page = 1;
+            if (*page > page_count)
+                *page = page_count;
+            size_t offset = (*page - 1) * page_size;
+
+            std::ostringstream sql;
+            sql << "SELECT " << SelectColumns() << " FROM file_metadata"
+                << where
+                << ListOrderBySql(sort)
+                << " LIMIT " << page_size
+                << " OFFSET " << offset;
+
+            if (mysql_query(conn_, sql.str().c_str()) != 0)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql query list failed, error=%s", mysql_error(conn_));
+                return false;
+            }
+            MYSQL_RES *result = mysql_store_result(conn_);
+            if (result == nullptr)
+            {
+                mylog::GetLogger("asynclogger")->Error("mysql store result failed for query list, error=%s", mysql_error(conn_));
+                return false;
+            }
+
+            files->clear();
+            MYSQL_ROW row;
+            while ((row = mysql_fetch_row(result)) != nullptr)
+            {
+                StorageInfo info;
+                if (FillInfo(row, &info))
+                    files->emplace_back(info);
+            }
+            mysql_free_result(result);
+            return true;
         }
+
     };
 #else
     class MysqlMetadataStore : public MetadataStore
@@ -320,7 +376,7 @@ namespace storage
         bool Delete(const std::string &) override { return false; }
         bool GetOneByURL(const std::string &, StorageInfo *) override { return false; }
         bool GetAll(std::vector<StorageInfo> *) override { return false; }
-        bool SaveAll(const std::vector<StorageInfo> &) override { return false; }
+        bool QueryList(const std::string &, const std::string &, size_t *, size_t, std::vector<StorageInfo> *, size_t *) override { return false; }
     };
 #endif
 }

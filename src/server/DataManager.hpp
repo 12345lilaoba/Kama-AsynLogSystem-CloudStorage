@@ -53,17 +53,19 @@ namespace storage
 
         std::unique_ptr<MetadataStore> CreateMetadataStore()
         {
-            storage::Config *config = storage::Config::GetInstance();
-            std::string store_type = config->GetMetadataStoreType();
-            if (store_type == "mysql")
-            {
-                return std::unique_ptr<MetadataStore>(new MysqlMetadataStore(config));
-            }
-            if (store_type != "json")
-            {
-                mylog::GetLogger("asynclogger")->Warn("unsupported metadata_store:%s, fallback to json", store_type.c_str());
-            }
-            return std::unique_ptr<MetadataStore>(new JsonMetadataStore(config->GetStorageInfoFile()));
+            return std::unique_ptr<MetadataStore>(new MysqlMetadataStore(storage::Config::GetInstance()));
+        }
+
+        void UpsertOneInMemory(const StorageInfo &info)
+        {
+            WriteLockGuard lock(&rwlock_);
+            table_[info.url_] = info;
+        }
+
+        void RemoveOneFromMemory(const std::string &key)
+        {
+            WriteLockGuard lock(&rwlock_);
+            table_.erase(key);
         }
 
     public:
@@ -84,50 +86,41 @@ namespace storage
         DataManager(const DataManager &) = delete;
         DataManager &operator=(const DataManager &) = delete;
 
-        bool InitLoad() // 初始化程序运行时从文件读取数据
+        bool InitLoad()
         {
             mylog::GetLogger("asynclogger")->Info("init datamanager");
             std::vector<StorageInfo> arry;
             if (!metadata_store_->GetAll(&arry))
                 return false;
 
-            for (const auto &info : arry)
             {
-                Insert(info);
+                WriteLockGuard lock(&rwlock_);
+                for (const auto &info : arry)
+                {
+                    table_[info.url_] = info;
+                }
             }
+            mylog::GetLogger("asynclogger")->Info("init datamanager loaded metadata count:%zu", arry.size());
             return true;
         }
 
-        bool Storage()
-        {
-            // 每次有信息改变则需要持久化存储一次
-            // 把table_中的数据转成json格式存入文件
-            mylog::GetLogger("asynclogger")->Info("message storage start");
-            std::vector<StorageInfo> arr;
-            if (!GetAll(&arr))
-            {
-                mylog::GetLogger("asynclogger")->Warn("GetAll fail,can't get StorageInfo");
-                return false;
-            }
-
-            if (!metadata_store_->SaveAll(arr))
-                return false;
-            mylog::GetLogger("asynclogger")->Info("message storage end");
-            return true;
-        }
 
         bool Insert(const StorageInfo &info)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Insert start");
+            if (need_persist_ == false)
             {
                 WriteLockGuard lock(&rwlock_);
                 table_[info.url_] = info;
+                mylog::GetLogger("asynclogger")->Info("data_message Insert end");
+                return true;
             }
             if (need_persist_ == true && metadata_store_->Insert(info) == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Insert:Storage Error");
                 return false;
             }
+            UpsertOneInMemory(info);
             mylog::GetLogger("asynclogger")->Info("data_message Insert end");
             return true;
         }
@@ -135,71 +128,54 @@ namespace storage
         bool Update(const StorageInfo &info)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Update start");
-            {
-                WriteLockGuard lock(&rwlock_);
-                table_[info.url_] = info;
-            }
             if (metadata_store_->Update(info) == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Update:Storage Error");
                 return false;
             }
+            UpsertOneInMemory(info);
             mylog::GetLogger("asynclogger")->Info("data_message Update end");
             return true;
         }
         bool Delete(const std::string &key)
         {
             mylog::GetLogger("asynclogger")->Info("data_message Delete start");
-            {
-                WriteLockGuard lock(&rwlock_);
-                auto it = table_.find(key);
-                if (it == table_.end())
-                {
-                    mylog::GetLogger("asynclogger")->Info("data_message Delete:not found");
-                    return false;
-                }
-                table_.erase(it);
-            }
             if (metadata_store_->Delete(key) == false)
             {
                 mylog::GetLogger("asynclogger")->Error("data_message Delete:Storage Error");
                 return false;
             }
+            RemoveOneFromMemory(key);
             mylog::GetLogger("asynclogger")->Info("data_message Delete end");
             return true;
         }
         bool GetOneByURL(const std::string &key, StorageInfo *info)
         {
-            ReadLockGuard lock(&rwlock_);
-            // URL是key，所以直接find()找
-            auto it = table_.find(key);
-            if (it == table_.end())
             {
-                return false;
-            }
-            *info = it->second; // 获取url对应的文件存储信息
-            return true;
-        }
-        bool GetOneByStoragePath(const std::string &storage_path, StorageInfo *info)
-        {
-            ReadLockGuard lock(&rwlock_);
-            // 遍历 通过realpath字段找到对应存储信息
-            for (const auto &e : table_)
-            {
-                if (e.second.storage_path_ == storage_path)
+                ReadLockGuard lock(&rwlock_);
+                // URL是key，所以直接find()找
+                auto it = table_.find(key);
+                if (it != table_.end())
                 {
-                    *info = e.second;
+                    *info = it->second; // 获取url对应的文件存储信息
                     return true;
                 }
             }
-            return false;
-        }
-        bool GetAll(std::vector<StorageInfo> *arry)
-        {
-            ReadLockGuard lock(&rwlock_);
-            for (const auto &e : table_)
-                arry->emplace_back(e.second);
+
+            StorageInfo stored_info;
+            if (!metadata_store_->GetOneByURL(key, &stored_info))
+                return false;
+
+            {
+                WriteLockGuard lock(&rwlock_);
+                table_[stored_info.url_] = stored_info;
+            }
+            *info = stored_info;
             return true;
+        }
+        bool QueryList(const std::string &keyword, const std::string &sort, size_t *page, size_t page_size, std::vector<StorageInfo> *files, size_t *total)
+        {
+            return metadata_store_->QueryList(keyword, sort, page, page_size, files, total);
         }
     }; // namespace DataManager
 }

@@ -40,6 +40,13 @@ namespace mylog{
 
         AsyncLogger::ptr DefaultLogger() { return default_logger_; }
 
+        void Shutdown()
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            loggers_.clear();
+            default_logger_.reset();
+        }
+
     private:
         LoggerManager()
         {

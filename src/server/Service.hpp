@@ -1,78 +1,64 @@
 #pragma once
+
 #include "DataManager.hpp"
-#include "HttpUtil.hpp"
-#include "PageRender.hpp"
+#include "DeleteHandler.hpp"
+#include "DownloadHandler.hpp"
+#include "ListHandler.hpp"
+#include "MultipartUploadHandler.hpp"
+#include "UploadHandler.hpp"
 
-#include <sys/queue.h>
 #include <event.h>
-// for http
-#include <evhttp.h>
+#include <event2/buffer.h>
 #include <event2/http.h>
+#include <evhttp.h>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
+#include <chrono>
 #include <memory>
-#include <regex>
-#include <algorithm>
-#include <cstdlib>
+#include <string>
 
-#include "base64.h" // 来自 cpp-base64 库
-
-extern storage::DataManager *data_;
 namespace storage
 {
     class Service
     {
     public:
-        Service()
+        explicit Service(DataManager &data_manager)
+            : server_port_(Config::GetInstance()->GetServerPort()),
+              server_ip_(Config::GetInstance()->GetServerIp()),
+              download_prefix_(Config::GetInstance()->GetDownloadPrefix()),
+              data_manager_(data_manager)
         {
 #ifdef DEBUG_LOG
-            mylog::GetLogger("asynclogger")->Debug("Service start(Construct)");
-#endif
-            server_port_ = Config::GetInstance()->GetServerPort();
-            server_ip_ = Config::GetInstance()->GetServerIp();
-            download_prefix_ = Config::GetInstance()->GetDownloadPrefix();
-#ifdef DEBUG_LOG
-            mylog::GetLogger("asynclogger")->Debug("Service end(Construct)");
+            mylog::GetLogger("asynclogger")->Debug("Service construct, configured ip:%s, bind:0.0.0.0, port:%d", server_ip_.c_str(), server_port_);
 #endif
         }
+
         bool RunModule()
         {
-            // 初始化环境
             std::unique_ptr<event_base, decltype(&event_base_free)> base(event_base_new(), event_base_free);
             if (base == nullptr)
             {
                 mylog::GetLogger("asynclogger")->Fatal("event_base_new err!");
                 return false;
             }
-            // 设置监听的端口和地址
-            sockaddr_in sin;
-            memset(&sin, 0, sizeof(sin));
-            sin.sin_family = AF_INET;
-            sin.sin_port = htons(server_port_);
-            // http 服务器,创建evhttp上下文
+
             std::unique_ptr<evhttp, decltype(&evhttp_free)> httpd(evhttp_new(base.get()), evhttp_free);
             if (httpd == nullptr)
             {
                 mylog::GetLogger("asynclogger")->Fatal("evhttp_new err!");
                 return false;
             }
-            // 绑定端口和ip
+
             if (evhttp_bind_socket(httpd.get(), "0.0.0.0", server_port_) != 0)
             {
                 mylog::GetLogger("asynclogger")->Fatal("evhttp_bind_socket failed!");
                 return false;
             }
-            // 设定回调函数
-            // 指定generic callback，也可以为特定的URI指定callback
-            evhttp_set_gencb(httpd.get(), GenHandler, NULL);
+            evhttp_set_gencb(httpd.get(), GenHandler, this);
 
 #ifdef DEBUG_LOG
             mylog::GetLogger("asynclogger")->Debug("event_base_dispatch");
 #endif
-            if (-1 == event_base_dispatch(base.get()))
+            if (event_base_dispatch(base.get()) == -1)
             {
                 mylog::GetLogger("asynclogger")->Debug("event_base_dispatch err");
             }
@@ -80,471 +66,143 @@ namespace storage
         }
 
     private:
-        uint16_t server_port_;
-        std::string server_ip_;
-        std::string download_prefix_;
-
-    private:
         static void GenHandler(struct evhttp_request *req, void *arg)
         {
+            Service *service = static_cast<Service *>(arg);
+            if (service == nullptr)
+            {
+                evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
+                return;
+            }
+            service->Dispatch(req);
+        }
+
+        void Dispatch(struct evhttp_request *req)
+        {
+            auto start = std::chrono::steady_clock::now();
+            std::string method = MethodName(evhttp_request_get_command(req));
+            std::string client = ClientAddress(req);
+            size_t request_bytes = 0;
+            struct evbuffer *input = evhttp_request_get_input_buffer(req);
+            if (input != nullptr)
+                request_bytes = evbuffer_get_length(input);
+
             std::string path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
             std::string decoded_path;
             if (!UrlDecode(path, &decoded_path))
             {
                 evhttp_send_reply(req, HTTP_BADREQUEST, "bad url", NULL);
+                LogAccess(method, path, HTTP_BADREQUEST, client, request_bytes, 0, start, "bad_url");
                 return;
             }
             path = decoded_path;
-            mylog::GetLogger("asynclogger")->Info("get req, uri: %s", path.c_str());
+            HttpUtil::HttpResult result;
 
-            // 根据请求中的内容判断是什么请求
-            // 这里是下载请求
             if (path.find("/download/") == 0)
             {
-                Download(req, arg);
+                result = DownloadHandler::Handle(req, data_manager_);
+            }
+            else if (path == "/upload/init")
+            {
+                result = MultipartUploadHandler::Init(req, data_manager_);
+            }
+            else if (path == "/upload/chunk")
+            {
+                result = MultipartUploadHandler::Chunk(req);
+            }
+            else if (path == "/upload/status")
+            {
+                result = MultipartUploadHandler::Status(req);
+            }
+            else if (path == "/upload/complete")
+            {
+                result = MultipartUploadHandler::Complete(req, data_manager_);
+            }
+            else if (path == "/upload/abort")
+            {
+                result = MultipartUploadHandler::Abort(req);
             }
             else if (path.find("/delete/") == 0)
             {
-                Delete(req, arg);
+                result = DeleteHandler::Handle(req, data_manager_);
             }
-            // 这里是上传
             else if (path == "/upload")
             {
-                Upload(req, arg);
+                result = UploadHandler::Handle(req, data_manager_);
             }
-            // 这里就是显示已存储文件列表，返回一个html页面给浏览器
             else if (path == "/")
             {
-                ListShow(req, arg);
+                result = ListHandler::Handle(req, data_manager_);
             }
             else
             {
                 evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
+                result = HttpUtil::HttpResult(HTTP_NOTFOUND, "not_found");
             }
+            LogAccess(method, path, result.status, client, request_bytes, result.bytes, start, result.reason);
         }
 
-        static bool ParseSizeParam(const std::string &query, const std::string &key, size_t *value)
+        static const char *MethodName(enum evhttp_cmd_type method)
         {
-            std::string token = key + "=";
-            size_t pos = query.find(token);
-            if (pos == std::string::npos)
-                return false;
-            pos += token.size();
-            size_t end = query.find('&', pos);
-            std::string raw = query.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
-            if (raw.empty())
-                return false;
-
-            char *parse_end = nullptr;
-            unsigned long parsed = std::strtoul(raw.c_str(), &parse_end, 10);
-            if (parse_end == raw.c_str() || *parse_end != '\0' || parsed == 0)
-                return false;
-
-            *value = parsed;
-            return true;
+            switch (method)
+            {
+            case EVHTTP_REQ_GET:
+                return "GET";
+            case EVHTTP_REQ_POST:
+                return "POST";
+            case EVHTTP_REQ_HEAD:
+                return "HEAD";
+            case EVHTTP_REQ_PUT:
+                return "PUT";
+            case EVHTTP_REQ_DELETE:
+                return "DELETE";
+            case EVHTTP_REQ_OPTIONS:
+                return "OPTIONS";
+            case EVHTTP_REQ_TRACE:
+                return "TRACE";
+            case EVHTTP_REQ_CONNECT:
+                return "CONNECT";
+            case EVHTTP_REQ_PATCH:
+                return "PATCH";
+            default:
+                return "UNKNOWN";
+            }
         }
 
-        static void ParsePagination(const char *query, size_t *page, size_t *page_size)
+        static std::string ClientAddress(struct evhttp_request *req)
         {
-            if (query == nullptr)
-                return;
+            struct evhttp_connection *connection = evhttp_request_get_connection(req);
+            if (connection == nullptr)
+                return "-";
 
-            std::string query_str = query;
-            ParseSizeParam(query_str, "page", page);
-            ParseSizeParam(query_str, "page_size", page_size);
-            if (*page_size < 1)
-                *page_size = 10;
-            if (*page_size > 100)
-                *page_size = 100;
+            char *host = nullptr;
+            ev_uint16_t port = 0;
+            evhttp_connection_get_peer(connection, &host, &port);
+            if (host == nullptr)
+                return "-";
+            return std::string(host) + ":" + std::to_string(port);
         }
 
-        static void Upload(struct evhttp_request *req, void *arg)
+        static void LogAccess(const std::string &method,
+                              const std::string &path,
+                              int status,
+                              const std::string &client,
+                              size_t request_bytes,
+                              size_t response_bytes,
+                              std::chrono::steady_clock::time_point start,
+                              const std::string &reason)
         {
-            mylog::GetLogger("asynclogger")->Info("Upload start");
-            // 约定：请求中包含"low_storage"，说明请求中存在文件数据,并希望普通存储\
-                包含"deep_storage"字段则压缩后存储
-            // 获取请求体内容
-            struct evbuffer *buf = evhttp_request_get_input_buffer(req);
-            if (buf == nullptr)
-            {
-                mylog::GetLogger("asynclogger")->Info("evhttp_request_get_input_buffer is empty");
-                return;
-            }
-
-            size_t len = evbuffer_get_length(buf); // 获取请求体的长度
-            mylog::GetLogger("asynclogger")->Info("evbuffer_get_length is %zu", len);
-            if (0 == len)
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "file empty", NULL);
-                mylog::GetLogger("asynclogger")->Info("request body is empty");
-                return;
-            }
-            if (len > Config::GetInstance()->GetMaxUploadSize())
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "file too large", NULL);
-                mylog::GetLogger("asynclogger")->Info("file too large, size:%zu, limit:%zu", len, Config::GetInstance()->GetMaxUploadSize());
-                return;
-            }
-            std::string content(len, 0);
-            if (-1 == evbuffer_copyout(buf, (void *)content.c_str(), len))
-            {
-                mylog::GetLogger("asynclogger")->Error("evbuffer_copyout error");
-                evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
-                return;
-            }
-
-            // 获取文件名
-            auto filename_header = evhttp_find_header(req->input_headers, "FileName");
-            // 解码文件名
-            if (filename_header == NULL)
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "missing FileName", NULL);
-                return;
-            }
-
-            std::string filename = filename_header;
-            try
-            {
-                filename = base64_decode(filename);
-            }
-            catch (const std::exception &e)
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "invalid base64 filename", NULL);
-                mylog::GetLogger("asynclogger")->Info("invalid base64 filename:%s", e.what());
-                return;
-            }
-
-            if (!HttpUtil::IsSafeFileName(filename))
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "illegal filename", NULL);
-                return;
-            }
-
-            // 获取存储类型，客户端自定义请求头 StorageType
-            auto storage_type_header = evhttp_find_header(req->input_headers, "StorageType");
-            if (storage_type_header == NULL)
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "missing StorageType", NULL);
-                return;
-            }
-            std::string storage_type = storage_type_header;
-            // 组织存储路径
-            std::string storage_path;
-            if (storage_type == "low")
-            {
-                storage_path = Config::GetInstance()->GetLowStorageDir();
-            }
-            else if (storage_type == "deep")
-            {
-                storage_path = Config::GetInstance()->GetDeepStorageDir();
-            }
-            else
-            {
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: HTTP_BADREQUEST");
-                evhttp_send_reply(req, HTTP_BADREQUEST, "Illegal storage type", NULL);
-                return;
-            }
-
-            StorageInfo old_info;
-            std::string download_url = Config::GetInstance()->GetDownloadPrefix() + filename;
-            if (data_->GetOneByURL(download_url, &old_info))
-            {
-                mylog::GetLogger("asynclogger")->Info("file already exists:%s", filename.c_str());
-                evhttp_send_reply(req, 409, "file already exists", NULL);
-                return;
-            }
-
-            // 如果不存在就创建low或deep目录
-            FileUtil dirCreate(storage_path);
-            dirCreate.CreateDirectory();
-
-            // 目录创建后加可以加上文件名，这个就是最终要写入的文件路径
-            storage_path += filename;
-#ifdef DEBUG_LOG
-            mylog::GetLogger("asynclogger")->Debug("storage_path:%s", storage_path.c_str());
-#endif
-
-            bool compressed = (storage_type == "deep" && !HttpUtil::IsAlreadyCompressedFile(filename));
-            if (!HttpUtil::WriteFileAtomically(storage_path, content, compressed))
-            {
-                mylog::GetLogger("asynclogger")->Error("%s storage fail, evhttp_send_reply: HTTP_INTERNAL", storage_type.c_str());
-                evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
-                return;
-            }
-            mylog::GetLogger("asynclogger")->Info("%s_storage success, compressed:%d", storage_type.c_str(), compressed);
-
-            // 添加存储文件信息，交由数据管理类进行管理
-            StorageInfo info;
-            std::string content_type = HttpUtil::NormalizeContentType(evhttp_find_header(req->input_headers, "Content-Type"));
-            std::string content_hash = HttpUtil::CalculateContentHash(content);
-            if (!info.NewStorageInfo(storage_path, storage_type, compressed, content.size(), content_type, content_hash, "fnv1a64") || !data_->Insert(info))
-            {
-                std::remove(storage_path.c_str());
-                evhttp_send_reply(req, HTTP_INTERNAL, "save metadata failed", NULL);
-                return;
-            }
-
-            evhttp_send_reply(req, HTTP_OK, "Success", NULL);
-            mylog::GetLogger("asynclogger")->Info("upload finish:success");
+            auto end = std::chrono::steady_clock::now();
+            long long cost_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            mylog::GetLogger("access_logger")->Info("method=%s uri=%s status=%d client=%s req_bytes=%zu resp_bytes=%zu cost_ms=%lld reason=%s",
+                                                    method.c_str(), path.c_str(), status, client.c_str(),
+                                                    request_bytes, response_bytes, cost_ms, reason.c_str());
         }
 
-        static void ListShow(struct evhttp_request *req, void *arg)
-        {
-            mylog::GetLogger("asynclogger")->Info("ListShow()");
-            // 1. 获取所有的文件存储信息
-            std::vector<StorageInfo> arry;
-            data_->GetAll(&arry);
-            std::sort(arry.begin(), arry.end(), [](const StorageInfo &left, const StorageInfo &right) {
-                return left.upload_time_ > right.upload_time_;
-            });
-
-            size_t page = 1;
-            size_t page_size = 10;
-            const char *query = evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req));
-            ParsePagination(query, &page, &page_size);
-
-            size_t total = arry.size();
-            size_t page_count = total == 0 ? 1 : (total + page_size - 1) / page_size;
-            if (page > page_count)
-                page = page_count;
-
-            size_t begin = (page - 1) * page_size;
-            size_t end = std::min(begin + page_size, total);
-            std::vector<StorageInfo> page_files;
-            if (begin < end)
-                page_files.assign(arry.begin() + begin, arry.begin() + end);
-
-            // 读取模板文件
-            std::ifstream templateFile("index.html");
-            std::string templateContent(
-                (std::istreambuf_iterator<char>(templateFile)),
-                std::istreambuf_iterator<char>());
-
-            // 替换html文件中的占位符
-            // 替换文件列表进html
-            templateContent = std::regex_replace(templateContent,
-                                                 std::regex("\\{\\{FILE_LIST\\}\\}"),
-                                                 PageRender::GenerateModernFileList(page_files, total, page, page_size));
-            // 替换服务器地址进hrml
-            templateContent = std::regex_replace(templateContent,
-                                                 std::regex("\\{\\{BACKEND_URL\\}\\}"),
-                                                 "http://" + storage::Config::GetInstance()->GetServerIp() + ":" + std::to_string(storage::Config::GetInstance()->GetServerPort()));
-            // 获取请求的输出evbuffer
-            struct evbuffer *buf = evhttp_request_get_output_buffer(req);
-            auto response_body = templateContent;
-            // 把前面的html数据给到evbuffer，然后设置响应头部字段，最后返回给浏览器
-            evbuffer_add(buf, (const void *)response_body.c_str(), response_body.size());
-            evhttp_add_header(req->output_headers, "Content-Type", "text/html;charset=utf-8");
-            evhttp_send_reply(req, HTTP_OK, NULL, NULL);
-            mylog::GetLogger("asynclogger")->Info("ListShow() finish");
-        }
-        static std::string GetETag(const StorageInfo &info)
-        {
-            // 自定义etag :  filename-fsize-mtime
-            FileUtil fu(info.storage_path_);
-            std::string etag = fu.FileName();
-            etag += "-";
-            etag += std::to_string(info.fsize_);
-            etag += "-";
-            etag += std::to_string(info.mtime_);
-            return etag;
-        }
-        static void Delete(struct evhttp_request *req, void *arg)
-        {
-            if (evhttp_request_get_command(req) != EVHTTP_REQ_DELETE)
-            {
-                evhttp_send_reply(req, HTTP_BADMETHOD, "method not allowed", NULL);
-                return;
-            }
-
-            std::string resource_path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
-            std::string decoded_path;
-            if (!UrlDecode(resource_path, &decoded_path))
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "bad url", NULL);
-                return;
-            }
-            resource_path = decoded_path;
-            const std::string delete_prefix = "/delete/";
-            if (resource_path.find(delete_prefix) != 0)
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "bad delete url", NULL);
-                return;
-            }
-
-            std::string filename = resource_path.substr(delete_prefix.size());
-            if (!HttpUtil::IsSafeFileName(filename))
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "illegal filename", NULL);
-                return;
-            }
-
-            std::string download_url = Config::GetInstance()->GetDownloadPrefix() + filename;
-            StorageInfo info;
-            if (!data_->GetOneByURL(download_url, &info))
-            {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "file not found", NULL);
-                return;
-            }
-
-            FileUtil fu(info.storage_path_);
-            if (fu.Exists() && remove(info.storage_path_.c_str()) != 0)
-            {
-                mylog::GetLogger("asynclogger")->Error("remove file error: %s -- %s", info.storage_path_.c_str(), strerror(errno));
-                evhttp_send_reply(req, HTTP_INTERNAL, "delete file failed", NULL);
-                return;
-            }
-
-            if (!data_->Delete(download_url))
-            {
-                evhttp_send_reply(req, HTTP_INTERNAL, "delete metadata failed", NULL);
-                return;
-            }
-
-            evhttp_send_reply(req, HTTP_OK, "delete success", NULL);
-            mylog::GetLogger("asynclogger")->Info("delete file success:%s", info.storage_path_.c_str());
-        }
-        static void Download(struct evhttp_request *req, void *arg)
-        {
-            // 1. 获取客户端请求的资源路径path   req.path
-            // 2. 根据资源路径，获取StorageInfo
-            StorageInfo info;
-            std::string resource_path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
-            std::string decoded_path;
-            if (!UrlDecode(resource_path, &decoded_path))
-            {
-                evhttp_send_reply(req, HTTP_BADREQUEST, "bad url", NULL);
-                return;
-            }
-            resource_path = decoded_path;
-
-            if (!data_->GetOneByURL(resource_path, &info))
-            {
-                evhttp_send_reply(req, HTTP_NOTFOUND, "file not found", NULL);
-                return;
-            }
-
-            mylog::GetLogger("asynclogger")->Info("request resource_path:%s", resource_path.c_str());
-
-            std::string download_path = info.storage_path_;
-            // 2.如果压缩过了就解压到新文件给用户下载
-            if (info.compressed_)
-            {
-                mylog::GetLogger("asynclogger")->Info("uncompressing:%s", info.storage_path_.c_str());
-                FileUtil fu(info.storage_path_);
-                download_path = Config::GetInstance()->GetLowStorageDir() +
-                                std::string(download_path.begin() + download_path.find_last_of('/') + 1, download_path.end());
-                FileUtil dirCreate(Config::GetInstance()->GetLowStorageDir());
-                dirCreate.CreateDirectory();
-                if (!fu.UnCompress(download_path)) // 将文件解压到low_storage下去或者再创一个文件夹做中转
-                {
-                    mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 500 - UnCompress failed");
-                    evhttp_send_reply(req, HTTP_INTERNAL, "uncompress failed", NULL);
-                    return;
-                }
-            }
-            mylog::GetLogger("asynclogger")->Info("request download_path:%s", download_path.c_str());
-            FileUtil fu(download_path);
-            if (fu.Exists() == false && info.compressed_)
-            {
-                // 如果是压缩文件，且解压失败，是服务端的错误
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 500 - UnCompress failed");
-                evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
-                return;
-            }
-            else if (fu.Exists() == false)
-            {
-                // 如果是普通文件，且文件不存在，是客户端的错误
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 400 - bad request,file not exists");
-                evhttp_send_reply(req, HTTP_BADREQUEST, "file not exists", NULL);
-                return;
-            }
-
-            // 3.确认文件是否需要断点续传
-            bool retrans = false;
-            int64_t range_start = 0;
-            int64_t range_length = 0;
-            int64_t file_size = fu.FileSize();
-            std::string etag = GetETag(info);
-
-            auto range_header = evhttp_find_header(req->input_headers, "Range");
-            auto if_range = evhttp_find_header(req->input_headers, "If-Range");
-            if (range_header != NULL && (if_range == NULL || etag == if_range))
-            {
-                if (!HttpUtil::ParseRangeHeader(range_header, file_size, &range_start, &range_length))
-                {
-                    std::string content_range = "bytes */" + std::to_string(file_size);
-                    evhttp_add_header(req->output_headers, "Content-Range", content_range.c_str());
-                    evhttp_send_reply(req, 416, "range not satisfiable", NULL);
-                    return;
-                }
-                retrans = true;
-                mylog::GetLogger("asynclogger")->Info("%s need breakpoint continuous transmission", download_path.c_str());
-            }
-
-            // 4. 读取文件数据，放入rsp.body中
-            if (fu.Exists() == false)
-            {
-                mylog::GetLogger("asynclogger")->Info("%s not exists", download_path.c_str());
-                download_path += "not exists";
-                evhttp_send_reply(req, 404, download_path.c_str(), NULL);
-                return;
-            }
-            evbuffer *outbuf = evhttp_request_get_output_buffer(req);
-            HttpUtil::UniqueFd fd(open(download_path.c_str(), O_RDONLY));
-            if (!fd.Valid())
-            {
-                mylog::GetLogger("asynclogger")->Error("open file error: %s -- %s", download_path.c_str(), strerror(errno));
-                evhttp_send_reply(req, HTTP_INTERNAL, strerror(errno), NULL);
-                return;
-            }
-            if (!retrans)
-            {
-                range_start = 0;
-                range_length = file_size;
-            }
-            // 和前面用的evbuffer_add类似，但是效率更高，具体原因可以看函数声明
-            if (-1 == evbuffer_add_file(outbuf, fd.Get(), range_start, range_length))
-            {
-                mylog::GetLogger("asynclogger")->Error("evbuffer_add_file: %d -- %s -- %s", fd.Get(), download_path.c_str(), strerror(errno));
-                evhttp_send_reply(req, HTTP_INTERNAL, "add file failed", NULL);
-                return;
-            }
-            fd.Release();
-            // 5. 设置响应头部字段： ETag， Accept-Ranges: bytes
-            evhttp_add_header(req->output_headers, "Accept-Ranges", "bytes");
-            evhttp_add_header(req->output_headers, "ETag", etag.c_str());
-            evhttp_add_header(req->output_headers, "Content-Type", info.content_type_.empty() ? "application/octet-stream" : info.content_type_.c_str());
-            evhttp_add_header(req->output_headers, "X-Storage-Type", info.storage_type_.empty() ? "low" : info.storage_type_.c_str());
-            evhttp_add_header(req->output_headers, "X-Storage-Compressed", info.compressed_ ? "true" : "false");
-            std::string original_size = std::to_string(info.original_size_);
-            std::string stored_size = std::to_string(info.stored_size_);
-            evhttp_add_header(req->output_headers, "X-Original-Size", original_size.c_str());
-            evhttp_add_header(req->output_headers, "X-Stored-Size", stored_size.c_str());
-            if (!info.content_hash_.empty())
-            {
-                evhttp_add_header(req->output_headers, "X-Content-Hash", info.content_hash_.c_str());
-                evhttp_add_header(req->output_headers, "X-Hash-Algorithm", info.hash_algo_.empty() ? "fnv1a64" : info.hash_algo_.c_str());
-            }
-            if (retrans)
-            {
-                std::string content_range = "bytes " + std::to_string(range_start) + "-" +
-                                            std::to_string(range_start + range_length - 1) + "/" +
-                                            std::to_string(file_size);
-                evhttp_add_header(req->output_headers, "Content-Range", content_range.c_str());
-                evhttp_send_reply(req, 206, "breakpoint continuous transmission", NULL);
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 206");
-            }
-            else
-            {
-                evhttp_send_reply(req, HTTP_OK, "Success", NULL);
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: HTTP_OK");
-            }
-
-            if (download_path != info.storage_path_)
-            {
-                remove(download_path.c_str()); // 删除文件
-            }
-        }
+    private:
+        uint16_t server_port_;
+        std::string server_ip_;
+        std::string download_prefix_;
+        DataManager &data_manager_;
     };
 }

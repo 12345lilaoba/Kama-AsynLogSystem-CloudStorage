@@ -9,10 +9,6 @@
 #include "AsyncWorker.hpp"
 #include "Message.hpp"
 #include "LogFlush.hpp"
-#include "backlog/CliBackupLog.hpp"
-#include "ThreadPoll.hpp"
-
-extern ThreadPool *tp;
 
 namespace mylog
 {
@@ -20,6 +16,7 @@ namespace mylog
     {
     public:
         using ptr = std::shared_ptr<AsyncLogger>;
+
         AsyncLogger(const std::string &logger_name, std::vector<LogFlush::ptr> &flushs, AsyncType type)
             : logger_name_(logger_name),//初始化日志器的名字
               flushs_(flushs.begin(), flushs.end()),//添加实例化方式给日志器，如日志输出到文件还是标准输出，可能有多种
@@ -125,20 +122,6 @@ namespace mylog
             // std::cout << "Debug:serialize begin\n";
             LogMessage msg(level, file, line, logger_name_, ret);
             std::string data = msg.format();
-            if (level == LogLevel::value::FATAL ||
-                level == LogLevel::value::ERROR)
-            {
-                try
-                {
-                    auto ret = tp->enqueue(start_backup, data);
-                    ret.get();
-                }
-                catch (const std::runtime_error &e)
-                {
-                    // 该线程池没有把stop设置为true的逻辑，所以不做处理
-                    std::cout << __FILE__ << __LINE__ << "thread pool closed" << std::endl;
-                }
-            }
             //获取到string类型的日志信息后就可以输出到异步缓冲区了，异步工作器后续会对其进行刷盘
             Flush(data.c_str(), data.size());
 

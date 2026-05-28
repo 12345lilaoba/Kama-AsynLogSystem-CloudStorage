@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>卡码异步日志存储系统</title>
+    <title>异步日志存储系统</title>
     <style>
         :root {
             --primary-color: #243447;
@@ -257,13 +257,20 @@
         }
 
         .pagination a,
-        .page-disabled {
+        .page-disabled,
+        .reset-link {
             border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 0.55rem 0.9rem;
             text-decoration: none;
             color: var(--primary-color);
             background: #fbfdff;
+        }
+
+        .reset-link {
+            display: inline-flex;
+            align-items: center;
+            min-height: 40px;
         }
 
         .page-disabled {
@@ -300,7 +307,7 @@
 
 <body>
     <div class="container">
-        <h1>📁卡码异步日志存储系统</h1>
+        <h1>📁异步日志存储系统</h1>
 
         <div class="upload-section">
             <div class="form-group">
@@ -308,22 +315,9 @@
                 <input type="file" id="fileInput">
             </div>
 
-            <div class="form-group">
-                <label>存储类型</label>
-                <div class="storage-type">
-                    <div>
-                        <input type="radio" name="storageType" id="deepStorage" value="deep" checked>
-                        <label for="deepStorage">深度存储</label>
-                    </div>
-                    <div>
-                        <input type="radio" name="storageType" id="lowStorage" value="low">
-                        <label for="lowStorage">普通存储</label>
-                    </div>
-                </div>
-            </div>
-
             <div class="upload-footer">
-                <button id="uploadButton" onclick="uploadFile()">⬆️ 开始上传</button>
+                <button id="uploadButton" onclick="uploadFile()">普通上传</button>
+                <button id="resumableUploadButton" onclick="resumableUploadFile()">断点上传</button>
                 <div id="uploadProgress" class="progress-track">
                     <div id="uploadProgressBar" class="progress-bar"></div>
                 </div>
@@ -336,9 +330,9 @@
     </div>
 
     <script>
-        // 动态配置注入
+        // 使用相对路径请求当前页面同源服务，避免 127.0.0.1、虚拟机 IP、端口转发之间产生跨域问题。
         const config = {
-            backendUrl: '{{BACKEND_URL}}'
+            backendUrl: ''
         };
 
         function setStatus(message, type = '') {
@@ -358,6 +352,9 @@
             return new Promise((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
                 xhr.open(method, url);
+                if (options.responseType) {
+                    xhr.responseType = options.responseType;
+                }
 
                 Object.entries(options.headers || {}).forEach(([key, value]) => {
                     xhr.setRequestHeader(key, value);
@@ -379,9 +376,9 @@
 
         async function uploadFile() {
             const fileInput = document.getElementById('fileInput');
-            const storageType = document.querySelector('input[name="storageType"]:checked').value;
             const file = fileInput.files[0];
             const uploadButton = document.getElementById('uploadButton');
+            const resumableUploadButton = document.getElementById('resumableUploadButton');
 
             if (!file) {
                 setStatus('请先选择文件', 'error');
@@ -390,13 +387,13 @@
 
             const encodedFilename = btoa(unescape(encodeURIComponent(file.name)));
             uploadButton.disabled = true;
-            setStatus(`正在上传 ${file.name}`);
+            resumableUploadButton.disabled = true;
+            setStatus(`正在普通上传 ${file.name}`);
             setProgress(0);
 
             try {
                 const response = await request('POST', `${config.backendUrl}/upload`, {
                     headers: {
-                        'StorageType': storageType,
                         'FileName': encodedFilename
                     },
                     body: file,
@@ -416,7 +413,140 @@
                 setStatus(error.message || '网络连接失败', 'error');
             } finally {
                 uploadButton.disabled = false;
+                resumableUploadButton.disabled = false;
             }
+        }
+
+        async function resumableUploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            const uploadButton = document.getElementById('uploadButton');
+            const resumableUploadButton = document.getElementById('resumableUploadButton');
+
+            if (!file) {
+                setStatus('请先选择文件', 'error');
+                return;
+            }
+
+            const encodedFilename = btoa(unescape(encodeURIComponent(file.name)));
+            uploadButton.disabled = true;
+            resumableUploadButton.disabled = true;
+            setStatus(`正在断点上传 ${file.name}`);
+            setProgress(0);
+
+            try {
+                await multipartUpload(file, encodedFilename);
+                setProgress(100);
+                setStatus('断点上传成功，正在刷新列表', 'success');
+                setTimeout(() => location.reload(), 300);
+            } catch (error) {
+                console.error('断点上传错误:', error);
+                setStatus(error.message || '网络连接失败', 'error');
+            } finally {
+                uploadButton.disabled = false;
+                resumableUploadButton.disabled = false;
+            }
+        }
+
+        async function multipartUpload(file, encodedFilename) {
+            const chunkSize = 4 * 1024 * 1024;
+            const concurrency = 4;
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            const sessionKey = `multipart:${file.name}:${file.size}:${file.lastModified}`;
+            let session = JSON.parse(localStorage.getItem(sessionKey) || 'null');
+
+            if (session && session.upload_id) {
+                const statusResponse = await request('GET', `${config.backendUrl}/upload/status?upload_id=${encodeURIComponent(session.upload_id)}`);
+                if (statusResponse.status >= 200 && statusResponse.status < 300) {
+                    session = JSON.parse(statusResponse.responseText);
+                } else {
+                    localStorage.removeItem(sessionKey);
+                    session = null;
+                }
+            }
+
+            if (!session) {
+                const initResponse = await request('POST', `${config.backendUrl}/upload/init`, {
+                    headers: {
+                        'FileName': encodedFilename,
+                        'Content-Type': file.type || 'application/octet-stream',
+                        'X-File-Size': String(file.size),
+                        'X-Chunk-Size': String(chunkSize),
+                        'X-Total-Chunks': String(totalChunks)
+                    }
+                });
+
+                if (initResponse.status < 200 || initResponse.status >= 300) {
+                    const reason = initResponse.statusText || initResponse.responseText || 'server error';
+                    throw new Error(`初始化上传失败：${initResponse.status} ${reason}`);
+                }
+                session = JSON.parse(initResponse.responseText);
+                localStorage.setItem(sessionKey, JSON.stringify(session));
+            }
+
+            const uploaded = new Set(session.uploaded_chunks || []);
+            let finishedBytes = 0;
+            uploaded.forEach((index) => {
+                const start = index * chunkSize;
+                const end = Math.min(file.size, start + chunkSize);
+                finishedBytes += end - start;
+            });
+            setProgress(Math.round((finishedBytes / file.size) * 100));
+
+            const pending = [];
+            for (let index = 0; index < totalChunks; index++) {
+                if (!uploaded.has(index)) pending.push(index);
+            }
+
+            let cursor = 0;
+            async function worker() {
+                while (cursor < pending.length) {
+                    const index = pending[cursor++];
+                    const start = index * chunkSize;
+                    const end = Math.min(file.size, start + chunkSize);
+                    const chunk = file.slice(start, end);
+                    await uploadChunkWithRetry(session.upload_id, index, chunk);
+                    uploaded.add(index);
+                    finishedBytes += chunk.size;
+                    setStatus(`正在上传分片 ${uploaded.size}/${totalChunks}`);
+                    setProgress(Math.round((finishedBytes / file.size) * 100));
+                }
+            }
+
+            const workers = [];
+            const workerCount = Math.min(concurrency, pending.length);
+            for (let i = 0; i < workerCount; i++) workers.push(worker());
+            await Promise.all(workers);
+
+            const completeResponse = await request('POST', `${config.backendUrl}/upload/complete`, {
+                headers: { 'UploadId': session.upload_id }
+            });
+            if (completeResponse.status < 200 || completeResponse.status >= 300) {
+                const reason = completeResponse.statusText || completeResponse.responseText || 'server error';
+                throw new Error(`合并分片失败：${completeResponse.status} ${reason}`);
+            }
+            localStorage.removeItem(sessionKey);
+        }
+
+        async function uploadChunkWithRetry(uploadId, index, chunk) {
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const response = await request('PUT', `${config.backendUrl}/upload/chunk`, {
+                        headers: {
+                            'UploadId': uploadId,
+                            'ChunkIndex': String(index)
+                        },
+                        body: chunk
+                    });
+                    if (response.status >= 200 && response.status < 300) return;
+                    lastError = new Error(`分片 ${index} 上传失败：${response.status}`);
+                } catch (error) {
+                    lastError = error;
+                }
+                await new Promise((resolve) => setTimeout(resolve, attempt * 400));
+            }
+            throw lastError || new Error(`分片 ${index} 上传失败`);
         }
 
         async function deleteFile(url) {
@@ -446,44 +576,16 @@
         }
 
         function updateFileCount() {
-            const visible = fileItems().filter(item => item.style.display !== 'none').length;
             const list = document.querySelector('.file-list');
+            const visible = list ? Number(list.dataset.pageCount) : fileItems().length;
             const total = list ? Number(list.dataset.total) : fileItems().length;
             const count = document.getElementById('fileCount');
             const empty = document.getElementById('emptyState');
-            if (count) count.textContent = `显示 ${visible} / ${total} 个文件`;
+            if (count) count.textContent = `当前页 ${visible} 个文件，匹配 ${total} 个文件`;
             if (empty) empty.style.display = visible === 0 ? 'block' : 'none';
         }
 
-        function filterFiles() {
-            const keyword = document.getElementById('fileSearch').value.trim().toLowerCase();
-            fileItems().forEach(item => {
-                const name = item.dataset.name.toLowerCase();
-                item.style.display = name.includes(keyword) ? '' : 'none';
-            });
-            updateFileCount();
-        }
-
-        function sortFiles() {
-            const sortType = document.getElementById('fileSort').value;
-            const container = document.getElementById('fileItems');
-            const items = fileItems();
-
-            items.sort((left, right) => {
-                if (sortType === 'name-asc') {
-                    return left.dataset.name.localeCompare(right.dataset.name, 'zh-CN');
-                }
-                if (sortType === 'size-desc') {
-                    return Number(right.dataset.size) - Number(left.dataset.size);
-                }
-                return Number(right.dataset.uploadTime) - Number(left.dataset.uploadTime);
-            });
-
-            items.forEach(item => container.appendChild(item));
-            filterFiles();
-        }
-
-        sortFiles();
+        updateFileCount();
     </script>
 </body>
 

@@ -3,8 +3,6 @@
 #include <cassert>
 #include <sstream>
 #include <memory>
-#include "bundle.h"
-#include "Config.hpp"
 #include <iostream>
 #include <experimental/filesystem>
 #include <string>
@@ -17,10 +15,6 @@ namespace storage
 {
     namespace fs = std::experimental::filesystem;
 
-    static unsigned char ToHex(unsigned char x)
-    {
-        return x > 9 ? x + 55 : x + 48;
-    }
 
     static bool IsHex(unsigned char x)
     {
@@ -182,54 +176,19 @@ namespace storage
             ofs.write(content, len);
             if (!ofs.good())
             {
-                mylog::GetLogger("asynclogger")->Info("%s, file set content error",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Info("%s, file set content error", filename_.c_str());
                 ofs.close();
+                return false;
             }
             ofs.close();
+            if (!ofs.good())
+            {
+                mylog::GetLogger("asynclogger")->Info("%s, file close error", filename_.c_str());
+                return false;
+            }
             return true;
         }
 
-        //////////////////////////////////////////////
-        // 压缩操作
-        //  压缩文件
-        bool Compress(const std::string &content, int format)
-        {
-
-            std::string packed = bundle::pack(format, content);
-            if (packed.size() == 0)
-            {
-                mylog::GetLogger("asynclogger")->Info("Compress packed size error:%d", packed.size());
-                return false;
-            }
-            // 将压缩的数据写入压缩包文件中
-            FileUtil f(filename_);
-            if (f.SetContent(packed.c_str(), packed.size()) == false)
-            {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, Compress SetContent error",filename_.c_str());
-                return false;
-            }
-            return true;
-        }
-        bool UnCompress(std::string &download_path)
-        {
-            // 将当前压缩包数据读取出来
-            std::string body;
-            if (this->GetContent(&body) == false)
-            {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, uncompress get file content failed!",filename_.c_str());
-                return false;
-            }
-            // 对压缩的数据进行解压缩
-            std::string unpacked = bundle::unpack(body);
-            // 将解压缩的数据写入到新文件
-            FileUtil fu(download_path);
-            if (fu.SetContent(unpacked.c_str(), unpacked.size()) == false)
-            {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, uncompress write packed data failed!",filename_.c_str());
-                return false;
-            }
-            return true;
-        }
         ///////////////////////////////////////////
         // 目录操作
         // 以下三个函数使用c++17中文件系统给的库函数实现
@@ -245,17 +204,6 @@ namespace storage
             return fs::create_directories(filename_);
         }
 
-        bool ScanDirectory(std::vector<std::string> *arry)
-        {
-            for (auto &p : fs::directory_iterator(filename_))
-            {
-                if (fs::is_directory(p) == true)
-                    continue;
-                // relative_path带有路径的文件名
-                arry->push_back(fs::path(p).relative_path().string());
-            }
-            return true;
-        }
     };
 
     class JsonUtil

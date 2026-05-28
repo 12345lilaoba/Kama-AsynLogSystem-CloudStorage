@@ -4,6 +4,7 @@ src/server/gdb_test
 log_system/logs_code/backlog/backup_server
 
 # Runtime data
+src/server/storage/
 src/server/storage.data
 src/server/storage.data.tmp
 src/server/logfile/
@@ -18,3 +19,5 @@ src/server/testfile/
 .DS_Store
 *.swp
 *.swo
+.vscode/
+PROJECT_STATUS.md

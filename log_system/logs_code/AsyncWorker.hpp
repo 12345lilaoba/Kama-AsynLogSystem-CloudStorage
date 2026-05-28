@@ -2,6 +2,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -20,11 +21,29 @@ namespace mylog
     {
     public:
         using ptr = std::shared_ptr<AsyncWorker>;
+        using TaskSubmitter = std::function<std::future<void>(std::function<void()>)>;
+
+        static void SetTaskSubmitter(TaskSubmitter submitter)
+        {
+            TaskSubmitterRef() = std::move(submitter);
+        }
+
         AsyncWorker(const functor &cb, AsyncType async_type = AsyncType::ASYNC_SAFE)
             : async_type_(async_type),
               callback_(cb),
               stop_(false),
-              thread_(std::thread(&AsyncWorker::ThreadEntry, this)) {}
+              use_worker_pool_(g_conf_data != nullptr && g_conf_data->use_worker_pool && static_cast<bool>(TaskSubmitterRef()))
+        {
+            if (use_worker_pool_)
+            {
+                worker_future_ = TaskSubmitterRef()([this]()
+                                                    { ThreadEntry(); });
+            }
+            else
+            {
+                thread_ = std::thread(&AsyncWorker::ThreadEntry, this);
+            }
+        }
         ~AsyncWorker() { Stop(); }
         void Push(const char *data, size_t len)
         {
@@ -46,11 +65,30 @@ namespace mylog
             }
             cond_consumer_.notify_all(); // 所有线程把缓冲区内数据处理完就结束了
             cond_productor_.notify_all();
-            if (thread_.joinable())
+            if (use_worker_pool_)
+            {
+                try
+                {
+                    worker_future_.get();
+                }
+                catch (const std::exception &e)
+                {
+                    std::cout << __FILE__ << __LINE__ << " async worker stop error:" << e.what() << std::endl;
+                }
+            }
+            else if (thread_.joinable())
+            {
                 thread_.join();
+            }
         }
 
     private:
+        static TaskSubmitter &TaskSubmitterRef()
+        {
+            static TaskSubmitter submitter;
+            return submitter;
+        }
+
         void ThreadEntry()
         {
             while (true)
@@ -80,6 +118,8 @@ namespace mylog
         std::condition_variable cond_productor_;
         std::condition_variable cond_consumer_;
         functor callback_; // 回调函数，用来告知工作器如何落地
+        bool use_worker_pool_;
+        std::future<void> worker_future_;
         std::thread thread_;
     };
 } // namespace mylog

@@ -5,16 +5,30 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <event2/http.h>
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <unordered_set>
 #include <unistd.h>
 
 namespace storage
 {
     namespace HttpUtil
     {
+        struct HttpResult
+        {
+            int status;
+            std::string reason;
+            size_t bytes;
+
+            HttpResult(int code = HTTP_OK, const std::string &message = "ok", size_t byte_count = 0)
+                : status(code),
+                  reason(message),
+                  bytes(byte_count)
+            {
+            }
+        };
+
         class UniqueFd
         {
         private:
@@ -135,27 +149,6 @@ namespace storage
             return output;
         }
 
-        static std::string Lowercase(std::string input)
-        {
-            for (char &ch : input)
-                ch = std::tolower(static_cast<unsigned char>(ch));
-            return input;
-        }
-
-        static bool IsAlreadyCompressedFile(const std::string &filename)
-        {
-            static const std::unordered_set<std::string> compressed_exts = {
-                ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz",
-                ".jpg", ".jpeg", ".png", ".gif", ".webp",
-                ".mp4", ".mkv", ".avi", ".mov", ".mp3", ".aac", ".flac",
-                ".pdf"};
-
-            std::string lower_filename = Lowercase(filename);
-            size_t dot_pos = lower_filename.find_last_of('.');
-            if (dot_pos == std::string::npos)
-                return false;
-            return compressed_exts.find(lower_filename.substr(dot_pos)) != compressed_exts.end();
-        }
 
         static std::string NormalizeContentType(const char *content_type)
         {
@@ -175,33 +168,13 @@ namespace storage
             return normalized;
         }
 
-        static std::string CalculateContentHash(const std::string &content)
-        {
-            uint64_t hash = 1469598103934665603ULL;
-            for (unsigned char ch : content)
-            {
-                hash ^= ch;
-                hash *= 1099511628211ULL;
-            }
-
-            std::stringstream ss;
-            ss << std::hex << std::setfill('0') << std::setw(16) << hash;
-            return ss.str();
-        }
-
-        static bool WriteFileAtomically(const std::string &storage_path, const std::string &content, bool compress_content)
+        static bool WriteFileAtomically(const std::string &storage_path, const std::string &content)
         {
             std::string tmp_path = storage_path + ".uploading";
             std::remove(tmp_path.c_str());
 
             FileUtil tmp(tmp_path);
-            bool ok = false;
-            if (compress_content)
-                ok = tmp.Compress(content, Config::GetInstance()->GetBundleFormat());
-            else
-                ok = tmp.SetContent(content.c_str(), content.size());
-
-            if (!ok)
+            if (!tmp.SetContent(content.c_str(), content.size()))
             {
                 std::remove(tmp_path.c_str());
                 return false;
@@ -216,58 +189,5 @@ namespace storage
             return true;
         }
 
-        static bool ParseRangeHeader(const std::string &range_header, int64_t file_size, int64_t *start, int64_t *length)
-        {
-            const std::string prefix = "bytes=";
-            if (file_size <= 0 || range_header.find(prefix) != 0)
-                return false;
-
-            std::string range = range_header.substr(prefix.size());
-            if (range.find(',') != std::string::npos)
-                return false;
-
-            size_t dash_pos = range.find('-');
-            if (dash_pos == std::string::npos)
-                return false;
-
-            std::string start_str = range.substr(0, dash_pos);
-            std::string end_str = range.substr(dash_pos + 1);
-            if (start_str.empty() && end_str.empty())
-                return false;
-
-            char *endptr = nullptr;
-            if (start_str.empty())
-            {
-                errno = 0;
-                long long suffix_len = std::strtoll(end_str.c_str(), &endptr, 10);
-                if (errno != 0 || endptr == end_str.c_str() || *endptr != '\0' || suffix_len <= 0)
-                    return false;
-                if (suffix_len > file_size)
-                    suffix_len = file_size;
-                *start = file_size - suffix_len;
-                *length = suffix_len;
-                return true;
-            }
-
-            errno = 0;
-            long long parsed_start = std::strtoll(start_str.c_str(), &endptr, 10);
-            if (errno != 0 || endptr == start_str.c_str() || *endptr != '\0' || parsed_start < 0 || parsed_start >= file_size)
-                return false;
-
-            long long parsed_end = file_size - 1;
-            if (!end_str.empty())
-            {
-                errno = 0;
-                parsed_end = std::strtoll(end_str.c_str(), &endptr, 10);
-                if (errno != 0 || endptr == end_str.c_str() || *endptr != '\0' || parsed_end < parsed_start)
-                    return false;
-                if (parsed_end >= file_size)
-                    parsed_end = file_size - 1;
-            }
-
-            *start = parsed_start;
-            *length = parsed_end - parsed_start + 1;
-            return true;
-        }
     }
 }

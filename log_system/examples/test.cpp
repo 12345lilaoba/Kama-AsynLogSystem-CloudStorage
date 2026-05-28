@@ -20,6 +20,8 @@ void test() {
 
 void init_thread_pool() {
     tp = new ThreadPool(g_conf_data->thread_count);
+    mylog::AsyncWorker::SetTaskSubmitter([](std::function<void()> task)
+                                         { return tp->enqueue(std::move(task)); });
 }
 int main() {
     g_conf_data = mylog::Util::JsonData::GetJsonData();
@@ -35,6 +37,9 @@ int main() {
     // 把日志器给管理对象，调用者通过调用单例管理对象对日志进行落地
     mylog::LoggerManager::GetInstance().AddLogger(Glb->Build());
     test();
+    mylog::LoggerManager::GetInstance().Shutdown();
+    mylog::AsyncWorker::SetTaskSubmitter({});
     delete(tp);
+    tp = nullptr;
     return 0;
 }

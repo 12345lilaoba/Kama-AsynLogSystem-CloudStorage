@@ -188,9 +188,8 @@ namespace mylog
                 threshold = root["threshold"].asInt64();
                 linear_growth = root["linear_growth"].asInt64();
                 flush_log = root["flush_log"].asInt64();
-                backup_addr = root["backup_addr"].asString();
-                backup_port = root["backup_port"].asInt();
                 thread_count = root["thread_count"].asInt();
+                use_worker_pool = root.get("use_worker_pool", true).asBool();
                 roll_file_max_size = root.get("roll_file_max_size", 1024 * 1024).asUInt64();
                 roll_file_max_count = root.get("roll_file_max_count", 10).asUInt64();
                 roll_file_max_age_days = root.get("roll_file_max_age_days", 7).asUInt64();
@@ -200,9 +199,8 @@ namespace mylog
                 size_t threshold;// 倍数扩容阈值
                 size_t linear_growth;// 线性增长容量
                 size_t flush_log;//控制日志同步到磁盘的时机，默认为0,1调用fflush，2调用fsync
-                std::string backup_addr;
-                uint16_t backup_port;
                 size_t thread_count;
+                bool use_worker_pool;//是否用线程池承载各 logger 的异步刷盘 worker
                 size_t roll_file_max_size;//单个滚动日志文件最大大小
                 size_t roll_file_max_count;//最多保留多少个滚动日志文件，0 表示不按数量清理
                 size_t roll_file_max_age_days;//最多保留多少天，0 表示不按时间清理
