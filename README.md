@@ -1,4 +1,4 @@
-# Kama-AsynLogSystem-CloudStorage
+# AsynLogSystem-CloudStorage
 
 > 基于 C++17 + libevent 的轻量云存储服务，集成自研异步日志系统。
 
